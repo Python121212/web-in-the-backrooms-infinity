@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Backrooms Infinity</title>
+    <style>
+        html, body {
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+        }
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #7a7539;
+            font-family: monospace;
+            font-size: 16px;
+            pointer-events: none;
+            text-shadow: 1px 1px 2px #000;
+        }
+    </style>
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+</head>
+<body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="ui-overlay">
+        <div>LEVEL 0: "The Lobby"</div>
+        <div id="coords">Chunk: 0, 0</div>
+    </div>
+
+    <script type="module">
+        import { Level0 } from './levels/level0.js';
+        import { ChunkManager } from './map.js';
+
+        const canvas = document.getElementById("renderCanvas");
+        const engine = new BABYLON.Engine(canvas, true);
+        let scene, camera, chunkManager;
+
+        const createScene = function () {
+            scene = new BABYLON.Scene(engine);
+            
+            // Level 0特有の不気味な黄がかった環境光と霧
+            scene.ambientColor = Level0.ambientColor;
+            scene.clearColor = new BABYLON.Color4(0.1, 0.1, 0.05, 1);
+            scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
+            scene.fogColor = new BABYLON.Color3(0.7, 0.65, 0.4);
+            scene.fogDensity = Level0.fogDensity;
+
+            // プレイヤー（カメラ）の設定
+            camera = new BABYLON.UniversalCamera("playerCamera", new BABYLON.Vector3(15, 2, 15), scene);
+            camera.attachControl(canvas, true);
+            
+            // 移動キーの設定（WASD / 矢印キー）
+            camera.keysUp.push(87, 38);    // W, Up
+            camera.keysDown.push(83, 40);  // S, Down
+            camera.keysLeft.push(65, 37);  // A, Left
+            camera.keysRight.push(68, 39); // D, Right
+            camera.speed = 0.3;
+            camera.angularSensibility = 1000;
+
+            // 簡易的な当たり判定の有効化 (カメラサイズ設定)
+            scene.collisionsEnabled = true;
+            camera.checkCollisions = true;
+            camera.applyGravity = true;
+            camera.ellipsoid = new BABYLON.Vector3(0.8, 1.8, 0.8); // プレイヤーの体型サイズ
+
+            // 天井の蛍光灯を模した全体的な光
+            const topLight = new BABYLON.HemisphericLight("ambientLight", new BABYLON.Vector3(0, 1, 0), scene);
+            topLight.intensity = 0.6;
+            topLight.diffuse = new BABYLON.Color3(1, 0.95, 0.8);
+
+            // チャンク管理システムの初期化
+            chunkManager = new ChunkManager(scene, Level0);
+
+            // 画面クリックでポインターロック（PCFPS操作対応）
+            canvas.addEventListener("click", () => {
+                canvas.requestPointerLock();
+            });
+
+            return scene;
+        };
+
+        scene = createScene();
+
+        // 毎フレームの更新ループ
+        engine.runRenderLoop(function () {
+            if (scene && camera) {
+                // プレイヤーの現在座標から周辺チャンクを更新
+                chunkManager.update(camera.position.x, camera.position.z);
+                
+                // UIに現在のチャンク座標を表示
+                const cx = Math.floor(camera.position.x / chunkManager.chunkSize);
+                const cz = Math.floor(camera.position.z / chunkManager.chunkSize);
+                document.getElementById("coords").innerText = `Chunk: ${cx}, ${cz} | Pos: ${camera.position.x.toFixed(1)}, ${camera.position.z.toFixed(1)}`;
+                
+                scene.render();
+            }
+        });
+
+        window.addEventListener("resize", function () {
+            engine.resize();
+        });
+    </script>
+</body>
+</html>

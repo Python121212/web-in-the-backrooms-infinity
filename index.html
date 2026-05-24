@@ -31,17 +31,19 @@
         const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
         
         let scene, camera, chunkManager, uiManager;
-        let dynamicPointLight, shadowGenerator; // 動的影用ライト
         
+        // 【超軽量化・複数ライトプール】
+        // 見える範囲にある蛍光灯に自動割り当てされる動的ライトと影のペア（最大4灯）
+        const MAX_DYNAMIC_LIGHTS = 4;
+        const lightPool = [];
+
         const playerState = {
             input: { forward: 0, backward: 0, left: 0, right: 0 },
             mobileMove: { x: 0, z: 0 },
-            // 物理演算用（スピードの慣性）
             velocityXZ: new BABYLON.Vector3(0, 0, 0),
             velocityY: 0,
-            friction: 7.5,      // 摩擦係数（高いほど早く止まる）
-            acceleration: 35.0, // 加速度力
-            
+            friction: 7.5,
+            acceleration: 35.0,
             isSprinting: false,
             lean: "none",
             stamina: 100,
@@ -49,7 +51,7 @@
             baseSpeed: 5.5,
             sprintSpeed: 9.5,
             currentMaxSpeed: 5.5,
-            height: 2.0, // 目線の高さ
+            height: 2.0,
             leanAngle: 0, targetLeanAngle: 0
         };
 
@@ -61,26 +63,28 @@
             scene.fogDensity = Level0.fogDensity;
             scene.ambientColor = Level0.ambientColor;
 
-            // 初期位置の壁の高さを4mにしたので、プレイヤーは最初高さ2mに配置
             camera = new BABYLON.UniversalCamera("playerCamera", new BABYLON.Vector3(16, playerState.height, 16), scene);
             camera.attachControl(canvas, true);
             camera.keysUp = []; camera.keysDown = []; camera.keysLeft = []; camera.keysRight = [];
             camera.inputs.remove(camera.inputs.attached.touch);
 
-            // 全体をうっすら照らすベースライト
+            // 全体をうっすらつなぐ環境光
             const ambientLight = new BABYLON.HemisphericLight("ambientLight", new BABYLON.Vector3(0, 1, 0), scene);
-            ambientLight.intensity = 0.15;
+            ambientLight.intensity = 0.12;
 
-            // 【超軽量・影システム】プレイヤー周辺の最寄り蛍光灯にワープする点光源を1つだけ作成
-            dynamicPointLight = new BABYLON.PointLight("dynamicFluoLight", new BABYLON.Vector3(0, 3.7, 0), scene);
-            dynamicPointLight.intensity = 0.8;
-            dynamicPointLight.diffuse = new BABYLON.Color3(1, 0.95, 0.75);
-            dynamicPointLight.range = 18; // 光の届く範囲
+            // ライトプール（4つの光源とそれぞれの影生成器）をあらかじめ生成
+            for (let i = 0; i < MAX_DYNAMIC_LIGHTS; i++) {
+                const pLight = new BABYLON.PointLight(`poolLight_${i}`, new BABYLON.Vector3(0, -100, 0), scene);
+                pLight.intensity = 0.0; // 初期状態は非表示（地下深くに隠す）
+                pLight.diffuse = new BABYLON.Color3(1.0, 0.94, 0.72);
+                pLight.range = 16;
 
-            // 影生成器の初期化 (マップサイズ 512 で軽量化)
-            shadowGenerator = new BABYLON.ShadowGenerator(512, dynamicPointLight);
-            shadowGenerator.useBlurExponentialShadowMap = true; // 影のフチを滑らかに
-            shadowGenerator.blurKernel = 16;
+                const shadowGen = new BABYLON.ShadowGenerator(256, pLight); // モバイル優先のため256サイズで高速化
+                shadowGen.useBlurExponentialShadowMap = true;
+                shadowGen.blurKernel = 12;
+
+                lightPool.push({ light: pLight, generator: shadowGen });
+            }
 
             chunkManager = new ChunkManager(scene, Level0);
             document.getElementById("ui-level-name").innerText = `LEVEL 0: "${Level0.name}"`;
@@ -143,33 +147,50 @@
             });
         }
 
-        // 最も近い蛍光灯を探して影の光源を移動させる軽量アルゴリズム
-        function updateDynamicLighting() {
-            let closestLightPos = null;
-            let minDistance = Infinity;
+        // 【新開発】見える範囲（視錐台内）の蛍光灯を判定し、リアルタイムに光と影を割り当てるシステム
+        function updateVisibleLights() {
+            // 全てのプールライトを一旦オフにする
+            for (let item of lightPool) {
+                item.light.intensity = 0.0;
+                item.generator.getShadowMap().renderList = [];
+            }
 
-            for (let lightPos of chunkManager.allLights) {
-                let dist = BABYLON.Vector3.DistanceSquared(camera.position, lightPos);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    closestLightPos = lightPos;
+            const visibleLights = [];
+
+            // 読み込まれているすべての蛍光灯に対して「視界に入っているか」をテスト
+            for (let detectorMesh of chunkManager.lightSources) {
+                if (!detectorMesh) continue;
+
+                // カメラの視錐台（Frustum＝見える範囲）に入っているか判定
+                if (scene.activeCamera.isInFrustum(detectorMesh)) {
+                    let dist = BABYLON.Vector3.DistanceSquared(camera.position, detectorMesh.position);
+                    visibleLights.push({ mesh: detectorMesh, distance: dist });
                 }
             }
 
-            if (closestLightPos) {
-                // 最寄りの蛍光灯の真下に点光源をワープさせる
-                dynamicPointLight.position.copyFrom(closestLightPos);
-            }
+            // 近い順にソート
+            visibleLights.sort((a, b) => a.distance - b.distance);
 
-            // 影を落とす対象（Caster）を動的に再登録
-            shadowGenerator.getShadowMap().renderList = [];
-            for (let wallMesh of chunkManager.shadowCasters) {
-                if (wallMesh) shadowGenerator.getShadowMap().renderList.push(wallMesh);
+            // 見えている蛍光灯の上位4つに、プールからライトと影をアクティブ化して配置
+            const activeCount = Math.min(visibleLights.length, MAX_DYNAMIC_LIGHTS);
+            for (let i = 0; i < activeCount; i++) {
+                const targetDetector = visibleLights[i].mesh;
+                const poolItem = lightPool[i];
+
+                // ライトの位置を蛍光灯の場所に移動させて点灯
+                poolItem.light.position.copyFrom(targetDetector.position);
+                poolItem.light.intensity = 0.75;
+
+                // このライトの影の対象に、読み込まれているすべての壁を登録
+                for (let wallMesh of chunkManager.shadowCasters) {
+                    if (wallMesh) {
+                        poolItem.generator.getShadowMap().renderList.push(wallMesh);
+                    }
+                }
             }
         }
 
         function updatePhysics(deltaTime) {
-            // 1. スタミナと速度上限設定
             const isMovingKeyboard = playerState.input.forward || playerState.input.backward || playerState.input.left || playerState.input.right;
             const isMovingMobile = playerState.mobileMove.x !== 0 || playerState.mobileMove.z !== 0;
             const isMoving = isMovingKeyboard || isMovingMobile;
@@ -183,7 +204,6 @@
             }
             uiManager.updateStamina(playerState.stamina);
 
-            // 2. 移動方向入力ベクトルの算出
             const frontVector = camera.getDirection(BABYLON.Vector3.Forward()); frontVector.y = 0; frontVector.normalize();
             const rightVector = camera.getDirection(BABYLON.Vector3.Right()); rightVector.y = 0; rightVector.normalize();
 
@@ -200,32 +220,27 @@
             }
             inputDir.normalize();
 
-            // 3. 【慣性処理】 加速度と摩擦による滑らかなスピード増減
+            // 慣性処理
             if (isMoving) {
-                // 入力方向へ加速
                 playerState.velocityXZ.x += inputDir.x * playerState.acceleration * deltaTime;
                 playerState.velocityXZ.z += inputDir.z * playerState.acceleration * deltaTime;
             }
 
-            // 摩擦（ブレーキ抵抗）の適用
             playerState.velocityXZ.x -= playerState.velocityXZ.x * playerState.friction * deltaTime;
             playerState.velocityXZ.z -= playerState.velocityXZ.z * playerState.friction * deltaTime;
 
-            // 最高速度のクランプ制限
             const speed = Math.sqrt(playerState.velocityXZ.x * playerState.velocityXZ.x + playerState.velocityXZ.z * playerState.velocityXZ.z);
             if (speed > playerState.currentMaxSpeed) {
                 playerState.velocityXZ.x = (playerState.velocityXZ.x / speed) * playerState.currentMaxSpeed;
                 playerState.velocityXZ.z = (playerState.velocityXZ.z / speed) * playerState.currentMaxSpeed;
             }
 
-            // カメラ位置へ座標反映
             camera.position.x += playerState.velocityXZ.x * deltaTime;
             camera.position.z += playerState.velocityXZ.z * deltaTime;
 
-            // 4. 垂直方向（ジャンプ・重力）
             if (!playerState.isGrounded) {
                 camera.position.y += playerState.velocityY * deltaTime;
-                playerState.velocityY -= 12.0 * deltaTime; // 重力加速度
+                playerState.velocityY -= 12.0 * deltaTime;
                 if (camera.position.y <= playerState.height) {
                     camera.position.y = playerState.height;
                     playerState.velocityY = 0;
@@ -233,7 +248,6 @@
                 }
             }
 
-            // 5. 左右リーン
             playerState.leanAngle += (playerState.targetLeanAngle - playerState.leanAngle) * 0.15;
             camera.rotation.z = playerState.leanAngle;
         }
@@ -242,11 +256,11 @@
 
         engine.runRenderLoop(function () {
             if (scene && camera) {
-                const deltaTime = Math.min(engine.getDeltaTime() / 1000, 0.1); // フレーム落ち時の跳ね防止クランプ
+                const deltaTime = Math.min(engine.getDeltaTime() / 1000, 0.1);
                 
                 updatePhysics(deltaTime);
                 chunkManager.update(camera.position.x, camera.position.z);
-                updateDynamicLighting(); // 動的ライト＆シャドウの更新
+                updateVisibleLights(); // 【新システム】画面に映る複数の蛍光灯だけを光らせる
                 
                 const cx = Math.floor(camera.position.x / chunkManager.chunkSize);
                 const cz = Math.floor(camera.position.z / chunkManager.chunkSize);

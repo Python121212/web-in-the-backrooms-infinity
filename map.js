@@ -1,4 +1,4 @@
-// map.js - 無限チャンク、壁高4m、蛍光灯メッシュ管理
+// map.js - 無限チャンク、壁高4m、天井テクスチャ修正、周囲360度ライト管理
 
 function seededRandom(x, z, seed = 12345) {
     const h = Math.sin(x * 12.9898 + z * 78.233 + seed) * 43758.5453123;
@@ -15,26 +15,28 @@ export class ChunkManager {
         this.activeChunks = new Map();
         
         this.shadowCasters = [];
-        this.lightSources = []; // 画面内の光判定用の蛍光灯メッシュ配列
+        this.lightSources = []; // 周囲のライト判定用の蛍光灯位置配列
 
         this.initMaterials();
     }
 
     initMaterials() {
+        // 壁
         this.wallMat = new BABYLON.StandardMaterial("wallMat", this.scene);
-        // 【修正】正しいテクスチャパスを再適用
         this.wallMat.diffuseTexture = new BABYLON.Texture(this.levelData.wallTexture, this.scene);
         const wallSettings = this.levelData.materialSettings.wall;
         this.wallMat.diffuseColor = wallSettings.diffuseColor;
         this.wallMat.specularColor = wallSettings.specularColor;
         this.wallMat.diffuseTexture.uScale = wallSettings.uScale; 
-        this.wallMat.diffuseTexture.vScale = 1.35; // 4mの高さに合わせてリピート率を調整
+        this.wallMat.diffuseTexture.vScale = 1.35; 
 
+        // 天井 【修正】正しい天井テクスチャのパスを適用
         this.ceilMat = new BABYLON.StandardMaterial("ceilMat", this.scene);
         this.ceilMat.diffuseTexture = new BABYLON.Texture(this.levelData.ceilingTexture, this.scene);
-        this.ceilMat.diffuseTexture.uScale = 16;
-        this.ceilMat.diffuseTexture.vScale = 16;
+        this.ceilMat.diffuseTexture.uScale = 6; // 綺麗にタイル状に並ぶようにスケール調整
+        this.ceilMat.diffuseTexture.vScale = 6;
 
+        // 床
         this.floorMat = new BABYLON.StandardMaterial("floorMat", this.scene);
         this.floorMat.diffuseColor = new BABYLON.Color3(0.32, 0.29, 0.18); 
         this.floorMat.specularColor = new BABYLON.Color3(0.01, 0.01, 0.01);
@@ -54,7 +56,7 @@ export class ChunkManager {
     manageChunks(centerCx, centerCz) {
         const keepKeys = new Set();
         this.shadowCasters = [];
-        this.lightSources = []; // 毎フレーム、アクティブな光源体を再集計
+        this.lightSources = []; 
 
         for (let dx = -2; dx <= 2; dx++) {
             for (let dz = -2; dz <= 2; dz++) {
@@ -67,7 +69,7 @@ export class ChunkManager {
                 const cached = this.activeChunks.get(k);
                 if (cached) {
                     if (cached.walls) this.shadowCasters.push(cached.walls);
-                    if (cached.lightMeshes) this.lightSources.push(...cached.lightMeshes);
+                    if (cached.lightPositions) this.lightSources.push(...cached.lightPositions);
                 }
             }
         }
@@ -114,27 +116,21 @@ export class ChunkManager {
         lightMat.emissiveColor = new BABYLON.Color3(0.95, 0.93, 0.7);
         lightMat.disableLighting = true;
 
-        const lightMeshes = [];
+        const lightPositions = [];
         for (let lx = 8; lx < this.chunkSize; lx += 16) {
             for (let lz = 8; lz < this.chunkSize; lz += 16) {
-                // 判定用を兼ねた蛍光灯カバー
-                const fixture = BABYLON.MeshBuilder.CreateBox(`fluo_${chunkKey}_${lx}_${lz}`, { width: 0.3, height: 0.05, depth: 1.6 }, this.scene);
+                const fixture = BABYLON.MeshBuilder.CreateBox("fluo_" + chunkKey, { width: 0.3, height: 0.05, depth: 1.6 }, this.scene);
                 fixture.position.set(startX + lx, wallHeight - 0.03, startZ + lz);
                 fixture.material = lightMat;
                 meshes.push(fixture);
                 
-                // 視界に入っているかテストするための軽量なダミー球体を、蛍光灯の直下に配置
-                const detector = BABYLON.MeshBuilder.CreateSphere(`detect_${chunkKey}_${lx}_${lz}`, { diameter: 0.1 }, this.scene);
-                detector.position.set(startX + lx, wallHeight - 0.2, startZ + lz);
-                detector.isVisible = false; // ゲーム画面には映さない
-                meshes.push(detector);
-
-                lightMeshes.push(detector);
+                // 光源を配置する座標ベクトル（高さ3.8m）を記録
+                lightPositions.push(new BABYLON.Vector3(startX + lx, wallHeight - 0.2, startZ + lz));
             }
         }
 
         // 床
-        const floor = BABYLON.MeshBuilder.CreatePlane(`floor_${chunkKey}`, { size: this.chunkSize }, this.scene);
+        const floor = BABYLON.MeshBuilder.CreatePlane("floor_" + chunkKey, { size: this.chunkSize }, this.scene);
         floor.position.set(startX + this.chunkSize / 2, 0, startZ + this.chunkSize / 2);
         floor.rotation.x = Math.PI / 2;
         floor.material = this.floorMat;
@@ -142,16 +138,16 @@ export class ChunkManager {
         meshes.push(floor);
 
         // 天井 (高さ 4.0m)
-        const ceiling = BABYLON.MeshBuilder.CreatePlane(`ceil_${chunkKey}`, { size: this.chunkSize }, this.scene);
+        const ceiling = BABYLON.MeshBuilder.CreatePlane("ceil_" + chunkKey, { size: this.chunkSize }, this.scene);
         ceiling.position.set(startX + this.chunkSize / 2, wallHeight, startZ + this.chunkSize / 2);
-        ceiling.rotation.x = -Math.PI / 2;
+        ceiling.rotation.x = Math.PI / 2; // 正しく下を向くように回転を統一
         ceiling.material = this.ceilMat;
         meshes.push(ceiling);
 
         this.activeChunks.set(chunkKey, {
             meshes: meshes,
             walls: wallTemplate,
-            lightMeshes: lightMeshes
+            lightPositions: lightPositions
         });
     }
 }

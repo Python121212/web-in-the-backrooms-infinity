@@ -2,33 +2,20 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>The Backrooms Infinity</title>
     <style>
         html, body {
             overflow: hidden;
-            width: 100%;
-            height: 100%;
-            margin: 0;
-            padding: 0;
-            background-color: #0d0c07; /* 背景も暗い黄色系に */
+            width: 100%; height: 100%;
+            margin: 0; padding: 0;
+            background-color: #0d0c07;
         }
-        #renderCanvas {
-            width: 100%;
-            height: 100%;
-            touch-action: none;
-        }
-        /* デバッグオーバーレイ（左上に固定、ui.jsと分離） */
+        #renderCanvas { width: 100%; height: 100%; touch-action: none; }
         #debug-overlay {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            color: #5e5a32;
-            font-family: monospace;
-            font-size: 14px;
-            pointer-events: none;
-            text-shadow: 1px 1px 2px #000;
-            z-index: 30;
+            position: absolute; top: 15px; left: 15px;
+            color: #5e5a32; font-family: monospace; font-size: 13px;
+            pointer-events: none; text-shadow: 1px 1px 2px #000; z-index: 30;
         }
     </style>
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
@@ -37,7 +24,7 @@
 <body>
     <canvas id="renderCanvas"></canvas>
     <div id="debug-overlay">
-        <div style="font-size: 16px; font-weight: bold;">The Backrooms Infinity</div>
+        <div style="font-size: 15px; font-weight: bold;">The Backrooms Infinity</div>
         <div id="ui-level-name">LEVEL: Loading...</div>
         <div id="ui-coords">Chunk: 0, 0</div>
     </div>
@@ -54,55 +41,60 @@
         
         const playerState = {
             input: { forward: 0, backward: 0, left: 0, right: 0 },
-            mobileMove: { x: 0, z: 0 }, // スマホスティック用ベクトル
+            mobileMove: { x: 0, z: 0 },
             isSprinting: false,
             lean: "none",
             stamina: 100,
             velocity: new BABYLON.Vector3(0, 0, 0),
             isGrounded: true,
-            baseSpeed: 0.14,
-            sprintSpeed: 0.25,
-            currentSpeed: 0.14,
+            baseSpeed: 0.12,
+            sprintSpeed: 0.22,
+            currentSpeed: 0.12,
             height: 2.0,
-            leanOffset: 0,
-            leanAngle: 0,
-            targetLeanOffset: 0,
-            targetLeanAngle: 0
+            leanAngle: 0, targetLeanAngle: 0
         };
 
         const createScene = function () {
             scene = new BABYLON.Scene(engine);
             
-            // 暗い黄色演出の適用
-            scene.ambientColor = Level0.ambientColor;
-            scene.clearColor = new BABYLON.Color4(0.02, 0.02, 0.01, 1);
+            // 【霧の有効化】
             scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
             scene.fogColor = Level0.fogColor;
             scene.fogDensity = Level0.fogDensity;
+            scene.ambientColor = Level0.ambientColor;
 
             camera = new BABYLON.UniversalCamera("playerCamera", new BABYLON.Vector3(16, playerState.height, 16), scene);
             camera.attachControl(canvas, true);
             
+            // 勝手に動くのを防止するために全インプットキーおよび標準タッチコントロールを削除
             camera.keysUp = []; camera.keysDown = []; camera.keysLeft = []; camera.keysRight = [];
-            camera.angularSensibility = 1400;
+            camera.inputs.remove(camera.inputs.attached.touch); // ← これでスクロールバグが消滅します
 
-            // 暗い部屋にマッチする、少し弱めた蛍光灯の光
-            const topLight = new BABYLON.HemisphericLight("fluorescentLight", new BABYLON.Vector3(0, 1, 0), scene);
-            topLight.intensity = 0.45; 
-            topLight.diffuse = new BABYLON.Color3(0.9, 0.88, 0.7);
+            // 空間全体の微弱な環境光
+            const ambientLight = new BABYLON.HemisphericLight("ambientLight", new BABYLON.Vector3(0, 1, 0), scene);
+            ambientLight.intensity = 0.2;
+            ambientLight.diffuse = new BABYLON.Color3(1, 0.95, 0.8);
 
             chunkManager = new ChunkManager(scene, Level0);
             document.getElementById("ui-level-name").innerText = `LEVEL 0: "${Level0.name}"`;
 
-            // UIの初期化と連携
+            // UIの初期化と各操作の統合
             uiManager = new UIManager({
                 onJump: () => { handleJump(); },
                 onSprint: (isSprint) => { playerState.isSprinting = isSprint; },
                 onLean: (dir) => { handleLean(dir); },
                 onStickMove: (x, y) => {
-                    // スマホスティックの入力を物理移動用に格納
                     playerState.mobileMove.x = x;
                     playerState.mobileMove.z = y;
+                },
+                onLookMove: (mdx, mdy) => {
+                    // スマホ右側ドラッグ時のカスタム視点移動（感度調整 0.005）
+                    camera.rotation.y += mdx * 0.005;
+                    camera.rotation.x += mdy * 0.005;
+                    // 上下の視点制限
+                    const limit = Math.PI / 2.5;
+                    if (camera.rotation.x > limit) camera.rotation.x = limit;
+                    if (camera.rotation.x < -limit) camera.rotation.x = -limit;
                 }
             });
 
@@ -117,32 +109,25 @@
 
         function handleJump() {
             if (playerState.isGrounded) {
-                playerState.velocity.y = 6.5;
+                playerState.velocity.y = 6.0;
                 playerState.isGrounded = false;
             }
         }
 
         function handleLean(direction) {
             playerState.lean = direction;
-            if (direction === "left") {
-                playerState.targetLeanOffset = -0.5;
-                playerState.targetLeanAngle = 0.07;
-            } else if (direction === "right") {
-                playerState.targetLeanOffset = 0.5;
-                playerState.targetLeanAngle = -0.07;
-            } else {
-                playerState.targetLeanOffset = 0;
-                playerState.targetLeanAngle = 0;
-            }
+            if (direction === "left") playerState.targetLeanAngle = 0.06;
+            else if (direction === "right") playerState.targetLeanAngle = -0.06;
+            else playerState.targetLeanAngle = 0;
         }
 
         function setupKeyboard() {
             window.addEventListener("keydown", (e) => {
                 const key = e.key.toLowerCase();
-                if (key === "w" || e.key === "ArrowUp") playerState.input.forward = 1;
-                if (key === "s" || e.key === "ArrowDown") playerState.input.backward = 1;
-                if (key === "a" || e.key === "ArrowLeft") playerState.input.left = 1;
-                if (key === "d" || e.key === "ArrowRight") playerState.input.right = 1;
+                if (key === "w") playerState.input.forward = 1;
+                if (key === "s") playerState.input.backward = 1;
+                if (key === "a") playerState.input.left = 1;
+                if (key === "d") playerState.input.right = 1;
                 if (e.shiftKey) playerState.isSprinting = true;
                 if (key === "q") handleLean("left");
                 if (key === "e") handleLean("right");
@@ -151,52 +136,40 @@
 
             window.addEventListener("keyup", (e) => {
                 const key = e.key.toLowerCase();
-                if (key === "w" || e.key === "ArrowUp") playerState.input.forward = 0;
-                if (key === "s" || e.key === "ArrowDown") playerState.input.backward = 0;
-                if (key === "a" || e.key === "ArrowLeft") playerState.input.left = 0;
-                if (key === "d" || e.key === "ArrowRight") playerState.input.right = 0;
+                if (key === "w") playerState.input.forward = 0;
+                if (key === "s") playerState.input.backward = 0;
+                if (key === "a") playerState.input.left = 0;
+                if (key === "d") playerState.input.right = 0;
                 if (e.key === "Shift") playerState.isSprinting = false;
-                if (key === "q" || key === "e") {
-                    if (playerState.lean !== "none") handleLean("none");
-                }
+                if (key === "q" || key === "e") handleLean("none");
             });
         }
 
         function updatePhysics(deltaTime) {
-            // 1. スタミナ処理
             const isMovingKeyboard = playerState.input.forward || playerState.input.backward || playerState.input.left || playerState.input.right;
             const isMovingMobile = playerState.mobileMove.x !== 0 || playerState.mobileMove.z !== 0;
             const isMoving = isMovingKeyboard || isMovingMobile;
 
             if (playerState.isSprinting && isMoving && playerState.stamina > 0) {
                 playerState.currentSpeed = playerState.sprintSpeed;
-                playerState.stamina -= 22 * deltaTime;
-                if (playerState.stamina < 0) playerState.stamina = 0;
+                playerState.stamina -= 20 * deltaTime;
             } else {
                 playerState.currentSpeed = playerState.baseSpeed;
-                if (!playerState.isSprinting || !isMoving) {
-                    playerState.stamina += 18 * deltaTime;
-                    if (playerState.stamina > 100) playerState.stamina = 100;
-                }
+                if (!isMoving && playerState.stamina < 100) playerState.stamina += 15 * deltaTime;
             }
             uiManager.updateStamina(playerState.stamina);
 
-            // 2. 移動方向ベクトルの決定
             const frontVector = camera.getDirection(BABYLON.Vector3.Forward());
             frontVector.y = 0; frontVector.normalize();
-
             const rightVector = camera.getDirection(BABYLON.Vector3.Right());
             rightVector.y = 0; rightVector.normalize();
 
             const moveDirection = new BABYLON.Vector3(0, 0, 0);
-            
-            // PCキーボード入力の合成
             if (playerState.input.forward) moveDirection.addInPlace(frontVector);
             if (playerState.input.backward) moveDirection.subtractInPlace(frontVector);
             if (playerState.input.right) moveDirection.addInPlace(rightVector);
             if (playerState.input.left) moveDirection.subtractInPlace(rightVector);
 
-            // スマホ仮想スティック入力の合成
             if (isMovingMobile) {
                 const mobileFront = frontVector.scale(playerState.mobileMove.z);
                 const mobileRight = rightVector.scale(playerState.mobileMove.x);
@@ -204,13 +177,11 @@
             }
 
             moveDirection.normalize();
-
-            // 3. X/Z独立軸の加算移動
             const moveStep = moveDirection.scale(playerState.currentSpeed);
             if (moveStep.x !== 0) camera.position.x += moveStep.x;
             if (moveStep.z !== 0) camera.position.z += moveStep.z;
 
-            // 4. Y軸重力計算
+            // 重力
             if (!playerState.isGrounded) {
                 camera.position.y += playerState.velocity.y * deltaTime;
                 playerState.velocity.y -= 9.8 * deltaTime;
@@ -221,8 +192,7 @@
                 }
             }
 
-            // 5. リーンの補間
-            playerState.leanOffset += (playerState.targetLeanOffset - playerState.leanOffset) * 0.15;
+            // リーン補間
             playerState.leanAngle += (playerState.targetLeanAngle - playerState.leanAngle) * 0.15;
             camera.rotation.z = playerState.leanAngle;
         }
@@ -243,9 +213,7 @@
             }
         });
 
-        window.addEventListener("resize", function () {
-            engine.resize();
-        });
+        window.addEventListener("resize", function () { engine.resize(); });
     </script>
 </body>
 </html>

@@ -18,72 +18,102 @@
             height: 100%;
             touch-action: none;
         }
-        #ui-overlay {
+        /* 基本的なデバッグ情報オーバーレイ（ui.jsとは別に左上に配置） */
+        #debug-overlay {
             position: absolute;
             top: 20px;
             left: 20px;
-            color: #7a7539;
+            color: #8a854a;
             font-family: monospace;
-            font-size: 16px;
+            font-size: 14px;
             pointer-events: none;
             text-shadow: 1px 1px 2px #000;
+            z-index: 10;
         }
     </style>
+    <!-- Babylon.js Core -->
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <!-- Babylon.js Loaders (将来的な.glbモデル読み込み用) -->
     <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
 </head>
 <body>
     <canvas id="renderCanvas"></canvas>
-    <div id="ui-overlay">
-        <div>LEVEL 0: "The Lobby"</div>
-        <div id="coords">Chunk: 0, 0</div>
+    <div id="debug-overlay">
+        <div style="font-size: 16px; font-weight: bold;">The Backrooms Infinity</div>
+        <div id="ui-level-name">LEVEL: Loading...</div>
+        <div id="ui-coords">Chunk: 0, 0</div>
     </div>
 
     <script type="module">
         import { Level0 } from './levels/level0.js';
         import { ChunkManager } from './map.js';
+        import { UIManager } from './ui.js';
 
         const canvas = document.getElementById("renderCanvas");
         const engine = new BABYLON.Engine(canvas, true);
-        let scene, camera, chunkManager;
+        
+        // ゲーム内のグローバル状態
+        let scene, camera, chunkManager, uiManager;
+        
+        // プレイヤーの物理・操作状態
+        const playerState = {
+            input: { forward: 0, backward: 0, left: 0, right: 0 },
+            isSprinting: false,
+            lean: "none", // "left" | "right" | "none"
+            stamina: 100,
+            velocity: new BABYLON.Vector3(0, 0, 0),
+            isGrounded: true,
+            baseSpeed: 0.15,
+            sprintSpeed: 0.28,
+            currentSpeed: 0.15,
+            height: 2.0,      // 通常時のカメラの高さ
+            leanOffset: 0,    // リーン時の左右ズレ量
+            leanAngle: 0,     // リーン時のカメラ傾き角
+            targetLeanOffset: 0,
+            targetLeanAngle: 0
+        };
 
         const createScene = function () {
             scene = new BABYLON.Scene(engine);
             
-            // Level 0特有の不気味な黄がかった環境光と霧
+            // Level 0の設定を適用 (環境光・霧)
             scene.ambientColor = Level0.ambientColor;
-            scene.clearColor = new BABYLON.Color4(0.1, 0.1, 0.05, 1);
+            scene.clearColor = new BABYLON.Color4(0.05, 0.05, 0.02, 1);
             scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
-            scene.fogColor = new BABYLON.Color3(0.7, 0.65, 0.4);
+            scene.fogColor = Level0.fogColor;
             scene.fogDensity = Level0.fogDensity;
 
-            // プレイヤー（カメラ）の設定
-            camera = new BABYLON.UniversalCamera("playerCamera", new BABYLON.Vector3(15, 2, 15), scene);
+            // プレイヤーを表現するフリーカメラ（キーボード標準機能は切ってカスタム移動を実装）
+            camera = new BABYLON.UniversalCamera("playerCamera", new BABYLON.Vector3(16, playerState.height, 16), scene);
             camera.attachControl(canvas, true);
             
-            // 移動キーの設定（WASD / 矢印キー）
-            camera.keysUp.push(87, 38);    // W, Up
-            camera.keysDown.push(83, 40);  // S, Down
-            camera.keysLeft.push(65, 37);  // A, Left
-            camera.keysRight.push(68, 39); // D, Right
-            camera.speed = 0.3;
-            camera.angularSensibility = 1000;
+            // Babylon.js標準の移動キー入力をクリア（X/Y分離計算とスタミナ制御のため）
+            camera.keysUp = [];
+            camera.keysDown = [];
+            camera.keysLeft = [];
+            camera.keysRight = [];
+            camera.angularSensibility = 1200; // マウス感度
 
-            // 簡易的な当たり判定の有効化 (カメラサイズ設定)
-            scene.collisionsEnabled = true;
-            camera.checkCollisions = true;
-            camera.applyGravity = true;
-            camera.ellipsoid = new BABYLON.Vector3(0.8, 1.8, 0.8); // プレイヤーの体型サイズ
+            // 蛍光灯を模した不気味なトップライト
+            const topLight = new BABYLON.HemisphericLight("fluorescentLight", new BABYLON.Vector3(0, 1, 0), scene);
+            topLight.intensity = 0.7;
+            topLight.diffuse = new BABYLON.Color3(1.0, 0.98, 0.85);
 
-            // 天井の蛍光灯を模した全体的な光
-            const topLight = new BABYLON.HemisphericLight("ambientLight", new BABYLON.Vector3(0, 1, 0), scene);
-            topLight.intensity = 0.6;
-            topLight.diffuse = new BABYLON.Color3(1, 0.95, 0.8);
-
-            // チャンク管理システムの初期化
+            // チャンク管理（マップ自動生成）システムの初期化
             chunkManager = new ChunkManager(scene, Level0);
+            document.getElementById("ui-level-name").innerText = `LEVEL 0: "${Level0.name}"`;
 
-            // 画面クリックでポインターロック（PCFPS操作対応）
+            // UI管理システムの初期化とコールバック連携
+            uiManager = new UIManager({
+                onJump: () => { handleJump(); },
+                onSprint: (isSprint) => { playerState.isSprinting = isSprint; },
+                onLean: (dir) => { handleLean(dir); }
+            });
+
+            // PC用キーボード入力イベントの登録
+            setupKeyboard();
+
+            // クリックで画面にポインターをロック
             canvas.addEventListener("click", () => {
                 canvas.requestPointerLock();
             });
@@ -91,23 +121,149 @@
             return scene;
         };
 
+        // ジャンプのトリガー処理
+        function handleJump() {
+            if (playerState.isGrounded) {
+                playerState.velocity.y = 7.0; // 上方向への初速度
+                playerState.isGrounded = false;
+            }
+        }
+
+        // リーン（体を傾ける）の目標値設定
+        function handleLean(direction) {
+            playerState.lean = direction;
+            if (direction === "left") {
+                playerState.targetLeanOffset = -0.6; // 左にズレる量
+                playerState.targetLeanAngle = 0.08;   // 左に傾く角度（ラジアン）
+            } else if (direction === "right") {
+                playerState.targetLeanOffset = 0.6;  // 右にズレる量
+                playerState.targetLeanAngle = -0.08; // 右に傾く角度
+            } else {
+                playerState.targetLeanOffset = 0;
+                playerState.targetLeanAngle = 0;
+            }
+        }
+
+        // PC用のキーボード処理（ui.jsと同期しつつplayerStateに入力値を格納）
+        function setupKeyboard() {
+            window.addEventListener("keydown", (e) => {
+                const key = e.key.toLowerCase();
+                if (key === "w" || e.key === "ArrowUp") playerState.input.forward = 1;
+                if (key === "s" || e.key === "ArrowDown") playerState.input.backward = 1;
+                if (key === "a" || e.key === "ArrowLeft") playerState.input.left = 1;
+                if (key === "d" || e.key === "ArrowRight") playerState.input.right = 1;
+                if (e.shiftKey) playerState.isSprinting = true;
+                if (key === "q") handleLean("left");
+                if (key === "e") handleLean("right");
+                if (e.key === " ") handleJump();
+            });
+
+            window.addEventListener("keyup", (e) => {
+                const key = e.key.toLowerCase();
+                if (key === "w" || e.key === "ArrowUp") playerState.input.forward = 0;
+                if (key === "s" || e.key === "ArrowDown") playerState.input.backward = 0;
+                if (key === "a" || e.key === "ArrowLeft") playerState.input.left = 0;
+                if (key === "d" || e.key === "ArrowRight") playerState.input.right = 0;
+                if (e.key === "Shift") playerState.isSprinting = false;
+                if (key === "q" || key === "e") {
+                    if (playerState.lean !== "none") handleLean("none");
+                }
+            });
+        }
+
+        // 物理計算・当たり判定・移動（毎フレーム実行）
+        function updatePhysics(deltaTime) {
+            // 1. スタミナ消費 & 速度の決定
+            const isMoving = playerState.input.forward || playerState.input.backward || playerState.input.left || playerState.input.right;
+            if (playerState.isSprinting && isMoving && playerState.stamina > 0) {
+                playerState.currentSpeed = playerState.sprintSpeed;
+                playerState.stamina -= 25 * deltaTime; // 走るとスタミナ減少
+                if (playerState.stamina < 0) playerState.stamina = 0;
+            } else {
+                playerState.currentSpeed = playerState.baseSpeed;
+                if (!playerState.isSprinting || !isMoving) {
+                    playerState.stamina += 15 * deltaTime; // 休憩、通常移動時はスタミナ回復
+                    if (playerState.stamina > 100) playerState.stamina = 100;
+                }
+            }
+            uiManager.updateStamina(playerState.stamina);
+
+            // 2. 移動ベクトルの算出（カメラの向きを基準にする）
+            const frontVector = camera.getDirection(BABYLON.Vector3.Forward());
+            frontVector.y = 0; // 上下を向いても水平に移動するようにリセット
+            frontVector.normalize();
+
+            const rightVector = camera.getDirection(BABYLON.Vector3.Right());
+            rightVector.y = 0;
+            rightVector.normalize();
+
+            const moveDirection = new BABYLON.Vector3(0, 0, 0);
+            if (playerState.input.forward) moveDirection.addInPlace(frontVector);
+            if (playerState.input.backward) moveDirection.subtractInPlace(frontVector);
+            if (playerState.input.right) moveDirection.addInPlace(rightVector);
+            if (playerState.input.left) moveDirection.subtractInPlace(rightVector);
+            moveDirection.normalize();
+
+            // 3. 【仕様通り】X軸とZ軸（水平面）の物理・当たり判定を別々に処理
+            // ※今回はBabylon標準のカメラ簡易移動を軽量化のベースに流用
+            const moveStep = moveDirection.scale(playerState.currentSpeed);
+            
+            // X軸独立移動
+            if (moveStep.x !== 0) {
+                camera.position.x += moveStep.x;
+                // 将来的に独自AABB判定を行う場合は、衝突検知時にここで camera.position.x を戻す
+            }
+            // Z軸独立移動
+            if (moveStep.z !== 0) {
+                camera.position.z += moveStep.z;
+                // 同様にZの衝突時にここで camera.position.z を戻す
+            }
+
+            // 4. Y軸独立計算（重力とジャンプ）
+            if (!playerState.isGrounded) {
+                camera.position.y += playerState.velocity.y * deltaTime;
+                playerState.velocity.y -= 9.8 * deltaTime; // 重力落下加速
+
+                // 地面（高さ2.0mを基準）への着地判定
+                if (camera.position.y <= playerState.height) {
+                    camera.position.y = playerState.height;
+                    playerState.velocity.y = 0;
+                    playerState.isGrounded = true;
+                }
+            }
+
+            // 5. リーン（傾き）の滑らかな補間処理 (イージング)
+            playerState.leanOffset += (playerState.targetLeanOffset - playerState.leanOffset) * 0.15;
+            playerState.leanAngle += (playerState.targetLeanAngle - playerState.leanAngle) * 0.15;
+            
+            // カメラのZ回転軸を傾ける
+            camera.rotation.z = playerState.leanAngle;
+        }
+
+        // 初期化実行
         scene = createScene();
 
-        // 毎フレームの更新ループ
+        // メインループ
         engine.runRenderLoop(function () {
             if (scene && camera) {
-                // プレイヤーの現在座標から周辺チャンクを更新
+                const deltaTime = engine.getDeltaTime() / 1000; // 秒換算のデルタタイム
+
+                // 物理と座標更新
+                updatePhysics(deltaTime);
+
+                // 無限マップの読み込み・更新処理
                 chunkManager.update(camera.position.x, camera.position.z);
                 
-                // UIに現在のチャンク座標を表示
+                // デバッグ用UIテキスト更新
                 const cx = Math.floor(camera.position.x / chunkManager.chunkSize);
                 const cz = Math.floor(camera.position.z / chunkManager.chunkSize);
-                document.getElementById("coords").innerText = `Chunk: ${cx}, ${cz} | Pos: ${camera.position.x.toFixed(1)}, ${camera.position.z.toFixed(1)}`;
+                document.getElementById("ui-coords").innerText = `Chunk: ${cx}, ${cz} | Pos: X:${camera.position.x.toFixed(1)} Z:${camera.position.z.toFixed(1)}`;
                 
                 scene.render();
             }
         });
 
+        // 画面リサイズ対応
         window.addEventListener("resize", function () {
             engine.resize();
         });

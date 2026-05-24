@@ -3,8 +3,8 @@
 export const Level0 = {
     id: 0,
     name: "The Lobby",
-    wallTexture: "Texture/level0/level0wall.png", // 【修正】元の正しいパスに変更
-    ceilingTexture: "./Texture/level0/level0ceiling.png",
+    wallTexture: "Texture/level0/level0wall.png",
+    ceilingTexture: "Texture/level0/level0ceiling.png", // 【修正】正しいパスへ修正
     
     materialSettings: {
         wall: {
@@ -14,7 +14,7 @@ export const Level0 = {
         }
     },
 
-    ambientColor: new BABYLON.Color3(0.18, 0.16, 0.10), // 光と影を引き立たせるための暗い環境光
+    ambientColor: new BABYLON.Color3(0.18, 0.16, 0.10), 
     fogColor: new BABYLON.Color3(0.20, 0.18, 0.10),
     fogDensity: 0.045,
 

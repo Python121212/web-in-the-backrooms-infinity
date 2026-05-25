@@ -71,12 +71,16 @@ export class GameManager {
     async init() {
         this.scene = new BABYLON.Scene(this.engine);
         
-        // 物理エンジンの有効化 (Havok)
-        const gravityVector = new BABYLON.Vector3(0, -9.81, 0);
-        this.scene.enablePhysics(gravityVector, this.physicsPlugin);
+        // 物理エンジンの有効化（プラグインが存在する場合のみ適用してフリーズを防ぐ）
+        if (this.physicsPlugin) {
+            const gravityVector = new BABYLON.Vector3(0, -9.81, 0);
+            this.scene.enablePhysics(gravityVector, this.physicsPlugin);
+        }
 
         // UIの初期セットアップ
-        this.ui.init(this);
+        if (this.ui && typeof this.ui.init === 'function') {
+            this.ui.init(this);
+        }
 
         // 最初のレベルの読み込み
         await this.loadLevel(this.currentLevelId);
@@ -85,7 +89,6 @@ export class GameManager {
         this.engine.runRenderLoop(() => {
             if (this.scene) {
                 this.scene.render();
-                // プレイヤーの現在地に応じた動的チャンク更新処理などをここに記述
                 this.updateChunks();
             }
         });
@@ -110,31 +113,31 @@ export class GameManager {
         console.log(`Loading: ${levelData.name} (${levelId})`);
         
         // UIに現在のレベル名を表示
-        this.ui.showLevelNotification(levelData.name, levelData.type);
+        if (this.ui && typeof this.ui.showLevelNotification === 'function') {
+            this.ui.showLevelNotification(levelData.name, levelData.type);
+        }
 
-        // 【関心の分離】動的なレベルファイルの読み込み
-        // 将来的に `levels/level0.js` などのモジュールを動的インポート(import)して
-        // その中に定義された3D環境生成関数（環境光、テクスチャ、壁の配置等）を呼び出す
+        // 【関心の分離】動的なレベルファイルの読み込みと環境構築
         try {
             let levelModulePath = `./levels/${levelId}.js`;
             if (levelData.type === "minus") levelModulePath = `./minus-levels/${levelId}.js`;
             if (levelData.type === "sub") levelModulePath = `./sub-levels/${levelId}.js`;
 
-            // ※実際のファイルが存在しない場合のフォールバックを考慮し、
-            // 現段階では擬似的にモジュール処理（またはベース生成）を行います。
-            // const levelModule = await import(levelModulePath);
-            // levelModule.generateEnvironment(this.scene, this);
-            
-            this.generateBaseEnvironmentPlaceholder(levelId);
-
+            // 動的インポートを試みる。ファイルが未作成やエラーならfallbackへ移行
+            const levelModule = await import(levelModulePath).catch(() => null);
+            if (levelModule && typeof levelModule.generateEnvironment === 'function') {
+                levelModule.generateEnvironment(this.scene, this);
+            } else {
+                this.generateBaseEnvironmentPlaceholder(levelId);
+            }
         } catch (error) {
-            console.warn(`固有のレベルファイルを読み込めなかったため、汎用生成を行います: ${error.message}`);
+            console.warn(`固有レベルファイルの実行エラーのため、プレースホルダーを生成します: ${error.message}`);
             this.generateBaseEnvironmentPlaceholder(levelId);
         }
 
-        // アイテムやエンティティのマネージャーへレベル切り替えを通知
-        this.items.onLevelChanged(levelId);
-        this.entity.onLevelChanged(levelId);
+        // 各種マネージャーへ通知（オプショナルチェイニングで安全化）
+        this.items?.onLevelChanged?.(levelId);
+        this.entity?.onLevelChanged?.(levelId);
     }
 
     /**
@@ -166,7 +169,6 @@ export class GameManager {
         const currentLevel = this.levelRegistry[this.currentLevelId];
         const nextTargetId = this.selectNextExit(currentLevel.exits);
 
-        // Doorの配置座標を決定（チャンクの中心付近をベースに、少しランダム性を加えるなど）
         const doorPosition = chunkCenterPosition.clone();
         doorPosition.y = 0; // 地面に接地
 
@@ -201,23 +203,10 @@ export class GameManager {
 
     /**
      * 【マルチプレイ（MMO）への布石】
-     * 生成されたDoorの情報をサーバー側（またはローカルメモリ）に同期・保存する関数。
-     * 将来的にこの関数内を WebSocket や Fetch API (POST) に差し替えるだけで、
-     * 全プレイヤーで同じ座標に同じ出口が同期されるようになります。
+     * 生成されたDoorの情報をサーバー側に同期・保存する関数
      */
     registerDoorToServer(chunkKey, doorData) {
-        // メモリ上に保存
         this.doorHistory.set(chunkKey, doorData);
-        
-        // TODO: MMO化の際はここを有効化
-        /*
-        fetch('/api/sync/door', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chunkKey, doorData })
-        }).catch(err => console.log("サーバー同期オフライン"));
-        */
-        
         console.log(`[Server Sync] Door登録完了: チャンク[${chunkKey}] -> 接続先: ${doorData.toLevel}`);
     }
 
@@ -226,26 +215,23 @@ export class GameManager {
      * @param {string} toLevelId 
      */
     async travelToLevel(toLevelId) {
-        this.ui.showLoadingOverlay();
+        if (this.ui && typeof this.ui.showLoadingOverlay === 'function') this.ui.showLoadingOverlay();
         await this.loadLevel(toLevelId);
-        this.ui.hideLoadingOverlay();
+        if (this.ui && typeof this.ui.hideLoadingOverlay === 'function') this.ui.hideLoadingOverlay();
     }
 
     /**
      * プレイヤーの周辺座標を監視し、チャンクを無限に生成・更新するロジック（ベース）
      */
     updateChunks() {
-        // 本来はプレイヤーの座標を取得してループ処理を行う
-        // 例: プレイヤーの周囲5x5チャンクを走査し、未生成なら evaluateDoorGeneration を呼ぶ
+        // 今後プレイヤーの位置座標連動をここに記述
     }
 
     /**
      * レベル切り替え時のクリーンアップ処理
      */
     clearCurrentLevel() {
-        // シネマティック効果や既存の環境メッシュ、敵、アイテムの破棄
         this.activeChunks.clear();
-        // シーン上の全メッシュのうち、プレイヤー以外の静的オブジェクトをリセット
         if (this.scene) {
             const meshesToDestroy = this.scene.meshes.filter(m => m.name !== "player");
             meshesToDestroy.forEach(m => m.dispose());
@@ -253,25 +239,24 @@ export class GameManager {
     }
 
     /**
-     * レベルファイルがまだない場合の仮の環境生成（テスト用プレースホルダー）
+     * レベルファイルがまだ無い、あるいは読み込みエラー時の仮環境生成（プレースホルダー）
      */
     generateBaseEnvironmentPlaceholder(levelId) {
-        // 最低限の床とライトを配置
         const light = new BABYLON.HemisphericLight("ambientLight", new BABYLON.Vector3(0, 1, 0), this.scene);
         light.intensity = 0.5;
 
         const ground = BABYLON.MeshBuilder.CreateGround("fallbackGround", { width: 50, height: 50 }, this.scene);
         const material = new BABYLON.StandardMaterial("floorMat", this.scene);
         
-        // レベルごとの簡易色分け
-        if (levelId === "level0") material.diffuseColor = new BABYLON.Color3(0.7, 0.6, 0.3); // 黄色系
-        else if (levelId === "manila-room") material.diffuseColor = new BABYLON.Color3(0.5, 0.4, 0.3); // マニラ紙色
-        else if (levelId === "level1") material.diffuseColor = new BABYLON.Color3(0.3, 0.3, 0.3); // コンクリート風グレー
-        else if (levelId === "level-1") material.diffuseColor = new BABYLON.Color3(0.1, 0.1, 0.2); // 暗い青
+        if (levelId === "level0") material.diffuseColor = new BABYLON.Color3(0.7, 0.6, 0.3); 
+        else if (levelId === "manila-room") material.diffuseColor = new BABYLON.Color3(0.5, 0.4, 0.3); 
+        else if (levelId === "level1") material.diffuseColor = new BABYLON.Color3(0.3, 0.3, 0.3); 
+        else if (levelId === "level-1") material.diffuseColor = new BABYLON.Color3(0.1, 0.1, 0.2); 
         
         ground.material = material;
         
-        // 物理アグリゲートの適用 (AABB当たり判定のベース)
-        new BABYLON.PhysicsAggregate(ground, BABYLON.PhysicsShapeType.BOX, { mass: 0 }, this.scene);
+        if (this.scene.physicsEnabled && this.physicsPlugin) {
+            new BABYLON.PhysicsAggregate(ground, BABYLON.PhysicsShapeType.BOX, { mass: 0 }, this.scene);
+        }
     }
 }

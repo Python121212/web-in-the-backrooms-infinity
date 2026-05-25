@@ -2,267 +2,174 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>The Backrooms Infinity</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>web in the backrooms Infinity</title>
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#000000">
+    <link rel="manifest" href="./manifest.json">
+    <link rel="apple-touch-icon" href="./Texture/icon.png">
+
     <style>
-        html, body { overflow: hidden; width: 100%; height: 100%; margin: 0; padding: 0; background-color: #050503; }
-        #renderCanvas { width: 100%; height: 100%; touch-action: none; }
-        #debug-overlay {
-            position: absolute; top: 15px; left: 15px; color: #5e5a32;
-            font-family: monospace; font-size: 13px; pointer-events: none; text-shadow: 1px 1px 2px #000; z-index: 30;
+        /* 画面全体の初期化（スクロール禁止・フルスクリーン） */
+        html, body {
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: #000000;
+            font-family: 'Courier New', Courier, monospace; /* VHS・レトロ風フォント */
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+
+        /* 3Dレンダリング用のCanvas */
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            outline: none;
+        }
+
+        /* UIレイヤー（ゲームオーバー、スタミナ、インベントリなどの親要素） */
+        #uiLayer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* 3D側のクリック・タッチを邪魔しない */
+            z-index: 10;
+        }
+
+        /* ロード画面のスタイリング */
+        #loadingScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #111110;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #e6dfb8; /* Level 0の壁に近いレトロな黄・ベージュ色 */
+            z-index: 100;
+            transition: opacity 0.5s ease;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #333;
+            border-top: 5px solid #e6dfb8;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
+
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    
+    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
 </head>
 <body>
+
     <canvas id="renderCanvas"></canvas>
-    <div id="debug-overlay">
-        <div style="font-size: 15px; font-weight: bold;">The Backrooms Infinity</div>
-        <div id="ui-level-name">LEVEL: Loading...</div>
-        <div id="ui-coords">Chunk: 0, 0</div>
+
+    <div id="uiLayer">
+        </div>
+
+    <div id="loadingScreen">
+        <div class="spinner"></div>
+        <p style="margin-top: 20px; letter-spacing: 2px;">INITIALIZING WEBGPU ENVIRONMENT...</p>
     </div>
 
     <script type="module">
-        import { Level0 } from './levels/level0.js';
-        import { ChunkManager } from './map.js';
-        import { UIManager } from './ui.js';
+        // 各種モジュールのインポート（将来的にロジックを関数化してエクスポートする前提）
+        // ※ 各jsファイル側で `export default ...` や `export function ...` を使用します。
+        import { initializeMap } from './map.js';
+        import { initializeUI } from './ui.js';
+        import { initializeItems } from './items.js';
+        import { initializeEntity } from './entity.js';
+        import { initializeVideoRecorder } from './video.js';
 
-        const canvas = document.getElementById("renderCanvas");
-        const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
-        
-        let scene, camera, chunkManager, uiManager;
-        
-        // 周囲360度で最も距離が近い蛍光灯に割り当てられる動的ライトプール（最大4灯）
-        const MAX_DYNAMIC_LIGHTS = 4;
-        const lightPool = [];
+        window.addEventListener('DOMContentLoaded', async () => {
+            const canvas = document.getElementById('renderCanvas');
+            let engine;
+            let scene;
 
-        const playerState = {
-            input: { forward: 0, backward: 0, left: 0, right: 0 },
-            mobileMove: { x: 0, z: 0 },
-            velocityXZ: new BABYLON.Vector3(0, 0, 0),
-            velocityY: 0,
-            friction: 7.5,
-            acceleration: 35.0,
-            isSprinting: false,
-            lean: "none",
-            stamina: 100,
-            isGrounded: true,
-            baseSpeed: 5.5,
-            sprintSpeed: 9.5,
-            currentMaxSpeed: 5.5,
-            height: 2.0,
-            leanAngle: 0, targetLeanAngle: 0
-        };
-
-        const createScene = function () {
-            scene = new BABYLON.Scene(engine);
-            
-            scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
-            scene.fogColor = Level0.fogColor;
-            scene.fogDensity = Level0.fogDensity;
-            scene.ambientColor = Level0.ambientColor;
-
-            camera = new BABYLON.UniversalCamera("playerCamera", new BABYLON.Vector3(16, playerState.height, 16), scene);
-            camera.attachControl(canvas, true);
-            camera.keysUp = []; camera.keysDown = []; camera.keysLeft = []; camera.keysRight = [];
-            camera.inputs.remove(camera.inputs.attached.touch);
-
-            const ambientLight = new BABYLON.HemisphericLight("ambientLight", new BABYLON.Vector3(0, 1, 0), scene);
-            ambientLight.intensity = 0.12;
-
-            // ライトプールと高精度なシャドウジェネレータの初期設定
-            for (let i = 0; i < MAX_DYNAMIC_LIGHTS; i++) {
-                const pLight = new BABYLON.PointLight(`poolLight_${i}`, new BABYLON.Vector3(0, -100, 0), scene);
-                pLight.intensity = 0.0;
-                pLight.diffuse = new BABYLON.Color3(1.0, 0.94, 0.72);
-                pLight.range = 16;
-
-                const shadowGen = new BABYLON.ShadowGenerator(256, pLight);
-                shadowGen.useBlurExponentialShadowMap = true;
-                shadowGen.blurKernel = 12;
-
-                lightPool.push({ light: pLight, generator: shadowGen });
-            }
-
-            chunkManager = new ChunkManager(scene, Level0);
-            document.getElementById("ui-level-name").innerText = `LEVEL 0: "${Level0.name}"`;
-
-            uiManager = new UIManager({
-                onJump: () => { handleJump(); },
-                onSprint: (isSprint) => { playerState.isSprinting = isSprint; },
-                onLean: (dir) => { handleLean(dir); },
-                onStickMove: (x, y) => { playerState.mobileMove.x = x; playerState.mobileMove.z = y; },
-                onLookMove: (mdx, mdy) => {
-                    camera.rotation.y += mdx * 0.004;
-                    camera.rotation.x += mdy * 0.004;
-                    const limit = Math.PI / 2.5;
-                    if (camera.rotation.x > limit) camera.rotation.x = limit;
-                    if (camera.rotation.x < -limit) camera.rotation.x = -limit;
+            try {
+                // 1. WebGPUのサポートチェックと最優先初期化
+                if (navigator.gpu && BABYLON.WebGPUEngine.IsSupportedAsync) {
+                    engine = new BABYLON.WebGPUEngine(canvas, {
+                        antialiasing: true
+                    });
+                    await engine.initAsync();
+                    console.log("Rendering Engine: WebGPU initialized.");
+                } else {
+                    // WebGPU未対応時のフォールバック（WebGL2）
+                    engine = new BABYLON.Engine(canvas, true);
+                    console.log("Rendering Engine: WebGL fallback initialized.");
                 }
-            });
 
-            setupKeyboard();
-            canvas.addEventListener("click", () => { canvas.requestPointerLock(); });
+                // 2. Havok 物理エンジンの初期化
+                const havokInstance = await HavokPhysics();
+                const physicsPlugin = new BABYLON.HavokPlugin(true, havokInstance);
 
-            return scene;
-        };
+                // 3. 基本となるシーンの作成
+                scene = new BABYLON.Scene(engine);
+                scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), physicsPlugin);
 
-        function handleJump() {
-            if (playerState.isGrounded) {
-                playerState.velocityY = 5.5;
-                playerState.isGrounded = false;
-            }
-        }
+                // 4. 各グローバル・サブシステムの初期化（依存注入）
+                const uiSystem     = initializeUI(scene);
+                const itemSystem   = initializeItems(scene);
+                const entitySystem = initializeEntity(scene);
+                const videoSystem  = initializeVideoRecorder(engine, scene);
+                
+                // 5. 核心となるマップ生成システムの起動（最初のLevel 0をロード）
+                await initializeMap(scene, { uiSystem, itemSystem, entitySystem });
 
-        function handleLean(direction) {
-            playerState.lean = direction;
-            if (direction === "left") playerState.targetLeanAngle = 0.06;
-            else if (direction === "right") playerState.targetLeanAngle = -0.06;
-            else playerState.targetLeanAngle = 0;
-        }
+                // ロード画面の非表示
+                const loader = document.getElementById('loadingScreen');
+                loader.style.opacity = 0;
+                setTimeout(() => loader.remove(), 500);
 
-        function setupKeyboard() {
-            window.addEventListener("keydown", (e) => {
-                const key = e.key.toLowerCase();
-                if (key === "w") playerState.input.forward = 1;
-                if (key === "s") playerState.input.backward = 1;
-                if (key === "a") playerState.input.left = 1;
-                if (key === "d") playerState.input.right = 1;
-                if (e.shiftKey) playerState.isSprinting = true;
-                if (key === "q") handleLean("left");
-                if (key === "e") handleLean("right");
-                if (e.key === " ") handleJump();
-            });
-
-            window.addEventListener("keyup", (e) => {
-                const key = e.key.toLowerCase();
-                if (key === "w") playerState.input.forward = 0;
-                if (key === "s") playerState.input.backward = 0;
-                if (key === "a") playerState.input.left = 0;
-                if (key === "d") playerState.input.right = 0;
-                if (e.key === "Shift") playerState.isSprinting = false;
-                if (key === "q" || key === "e") handleLean("none");
-            });
-        }
-
-        // 【修正ロジック】360度、プレイヤーに単純に近い蛍光灯を優先してライティングするシステム
-        function updateProximityLights() {
-            // プール内のライトを一度リセット
-            for (let item of lightPool) {
-                item.light.intensity = 0.0;
-                item.generator.getShadowMap().renderList = [];
-            }
-
-            const lightCandidates = [];
-
-            // 読み込まれているすべての蛍光灯の位置リストを走査
-            for (let lightVec of chunkManager.lightSources) {
-                // 向きに関係なくプレイヤーからの2乗距離を計測
-                let distSq = BABYLON.Vector3.DistanceSquared(camera.position, lightVec);
-                lightCandidates.push({ position: lightVec, distanceSq: distSq });
-            }
-
-            // 近い順（距離が小さい順）に並び替える
-            lightCandidates.sort((a, b) => a.distanceSq - b.distanceSq);
-
-            // 前後左右問わず、最もプレイヤーに近い上位4つの蛍光灯を本物の光として駆動
-            const activeCount = Math.min(lightCandidates.length, MAX_DYNAMIC_LIGHTS);
-            for (let i = 0; i < activeCount; i++) {
-                const targetLightData = lightCandidates[i];
-                const poolItem = lightPool[i];
-
-                poolItem.light.position.copyFrom(targetLightData.position);
-                poolItem.light.intensity = 0.75;
-
-                // 影の投影リストに全ての壁を流し込む
-                for (let wallMesh of chunkManager.shadowCasters) {
-                    if (wallMesh) {
-                        poolItem.generator.getShadowMap().renderList.push(wallMesh);
+                // 6. メインループの実行
+                engine.runRenderLoop(() => {
+                    if (scene && scene.activeCamera) {
+                        scene.render();
                     }
-                }
-            }
-        }
+                });
 
-        function updatePhysics(deltaTime) {
-            const isMovingKeyboard = playerState.input.forward || playerState.input.backward || playerState.input.left || playerState.input.right;
-            const isMovingMobile = playerState.mobileMove.x !== 0 || playerState.mobileMove.z !== 0;
-            const isMoving = isMovingKeyboard || isMovingMobile;
+                // ウィンドウリサイズ対応
+                window.addEventListener('resize', () => {
+                    engine.resize();
+                });
 
-            if (playerState.isSprinting && isMoving && playerState.stamina > 0) {
-                playerState.currentMaxSpeed = playerState.sprintSpeed;
-                playerState.stamina -= 22 * deltaTime;
-            } else {
-                playerState.currentMaxSpeed = playerState.baseSpeed;
-                if (!isMoving && playerState.stamina < 100) playerState.stamina += 15 * deltaTime;
-            }
-            uiManager.updateStamina(playerState.stamina);
-
-            const frontVector = camera.getDirection(BABYLON.Vector3.Forward()); frontVector.y = 0; frontVector.normalize();
-            const rightVector = camera.getDirection(BABYLON.Vector3.Right()); rightVector.y = 0; rightVector.normalize();
-
-            const inputDir = new BABYLON.Vector3(0, 0, 0);
-            if (playerState.input.forward) inputDir.addInPlace(frontVector);
-            if (playerState.input.backward) inputDir.subtractInPlace(frontVector);
-            if (playerState.input.right) inputDir.addInPlace(rightVector);
-            if (playerState.input.left) inputDir.subtractInPlace(rightVector);
-
-            if (isMovingMobile) {
-                const mobileFront = frontVector.scale(playerState.mobileMove.z);
-                const mobileRight = rightVector.scale(playerState.mobileMove.x);
-                inputDir.addInPlace(mobileFront).addInPlace(mobileRight);
-            }
-            inputDir.normalize();
-
-            if (isMoving) {
-                playerState.velocityXZ.x += inputDir.x * playerState.acceleration * deltaTime;
-                playerState.velocityXZ.z += inputDir.z * playerState.acceleration * deltaTime;
-            }
-
-            playerState.velocityXZ.x -= playerState.velocityXZ.x * playerState.friction * deltaTime;
-            playerState.velocityXZ.z -= playerState.velocityXZ.z * playerState.friction * deltaTime;
-
-            const speed = Math.sqrt(playerState.velocityXZ.x * playerState.velocityXZ.x + playerState.velocityXZ.z * playerState.velocityXZ.z);
-            if (speed > playerState.currentMaxSpeed) {
-                playerState.velocityXZ.x = (playerState.velocityXZ.x / speed) * playerState.currentMaxSpeed;
-                playerState.velocityXZ.z = (playerState.velocityXZ.z / speed) * playerState.currentMaxSpeed;
-            }
-
-            camera.position.x += playerState.velocityXZ.x * deltaTime;
-            camera.position.z += playerState.velocityXZ.z * deltaTime;
-
-            if (!playerState.isGrounded) {
-                camera.position.y += playerState.velocityY * deltaTime;
-                playerState.velocityY -= 12.0 * deltaTime;
-                if (camera.position.y <= playerState.height) {
-                    camera.position.y = playerState.height;
-                    playerState.velocityY = 0;
-                    playerState.isGrounded = true;
-                }
-            }
-
-            playerState.leanAngle += (playerState.targetLeanAngle - playerState.leanAngle) * 0.15;
-            camera.rotation.z = playerState.leanAngle;
-        }
-
-        scene = createScene();
-
-        engine.runRenderLoop(function () {
-            if (scene && camera) {
-                const deltaTime = Math.min(engine.getDeltaTime() / 1000, 0.1);
-                
-                updatePhysics(deltaTime);
-                chunkManager.update(camera.position.x, camera.position.z);
-                updateProximityLights(); // 【修正】360度全方位の最寄りライトを駆動
-                
-                const cx = Math.floor(camera.position.x / chunkManager.chunkSize);
-                const cz = Math.floor(camera.position.z / chunkManager.chunkSize);
-                document.getElementById("ui-coords").innerText = `Chunk: ${cx}, ${cz} | Pos: X:${camera.position.x.toFixed(1)} Z:${camera.position.z.toFixed(1)}`;
-                
-                scene.render();
+            } catch (error) {
+                console.error("Failed to initialize the game environment:", error);
+                document.getElementById('loadingScreen').innerHTML = `<p style="color: #ff3333;">ERROR: FAILED TO INITIALIZE WEBGPU/HAVOK.<br>${error.message}</p>`;
             }
         });
 
-        window.addEventListener("resize", function () { engine.resize(); });
+        // PWA サービスワーカーの登録
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(reg => console.log('ServiceWorker registered: ', reg.scope))
+                    .catch(err => console.log('ServiceWorker registration failed: ', err));
+            });
+        }
     </script>
 </body>
 </html>

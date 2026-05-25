@@ -12,7 +12,6 @@
     <link rel="apple-touch-icon" href="./Texture/icon.png">
 
     <style>
-        /* 全画面表示のためのベーススタイル */
         html, body {
             overflow: hidden;
             width: 100%;
@@ -20,13 +19,12 @@
             margin: 0;
             padding: 0;
             background-color: #000000;
-            font-family: 'Courier New', Courier, monospace; /* バックルームズの雰囲気に合わせたフォント */
+            font-family: 'Courier New', Courier, monospace;
             user-select: none;
             -webkit-user-select: none;
             touch-action: none;
         }
 
-        /* Babylon.jsのメインキャンバス */
         #renderCanvas {
             width: 100%;
             height: 100%;
@@ -34,25 +32,23 @@
             display: block;
         }
 
-        /* ゲームUIのオーバーレイコンテナ（詳細はui.jsで制御） */
         #uiContainer {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none; /* 3D空間のクリックを邪魔しない */
+            pointer-events: none;
             z-index: 10;
         }
 
-        /* ロード画面 */
         #loadingScreen {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background-color: #1a1a11; /* レベル0を意識したくすんだ黄色・カーキ系 */
+            background-color: #1a1a11;
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -60,6 +56,9 @@
             color: #ffeedd;
             z-index: 100;
             transition: opacity 0.5s ease;
+            padding: 20px;
+            box-sizing: border-box;
+            text-align: center;
         }
 
         .spinner {
@@ -86,90 +85,112 @@
 <body>
 
     <canvas id="renderCanvas"></canvas>
-
-    <div id="uiContainer">
-        </div>
+    <div id="uiContainer"></div>
 
     <div id="loadingScreen">
-        <div class="spinner"></div>
-        <p id="loadingText" style="margin-top: 20px; letter-spacing: 2px;">INITIALIZING C.E.L.L. SYSTEM...</p>
+        <div class="spinner" id="loadingSpinner"></div>
+        <p id="loadingText" style="margin-top: 20px; letter-spacing: 2px; font-size: 16px; word-break: break-all;">INITIALIZING C.E.L.L. SYSTEM...</p>
     </div>
 
     <script type="module">
         // PWA サービスワーカーの登録
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js').then(reg => {
-                    console.log('ServiceWorker registration successful with scope: ', reg.scope);
-                }).catch(err => {
-                    console.log('ServiceWorker registration failed: ', err);
-                });
+                navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW registration failed: ', err));
             });
         }
 
-        // 各種コアモジュールをインポート
-        //（拡張性を高めるため、各ファイルは export / import が可能なESモジュール形式を想定しています）
+        // コアモジュールのインポート
         import { GameManager } from './map.js';
         import { UIManager } from './ui.js';
-        import { ItemManager } from './items.js';
-        import { EntityManager } from './entity.js';
-        import { VideoRecorder } from './video.js';
+
+        // --- 未実装ファイル用フォールバックモック ---
+        // まだ作成していないファイルや、インポートエラーで全体が止まるのを防ぐための安全弁
+        class DummyItemManager { onLevelChanged(id){} }
+        class DummyEntityManager { onLevelChanged(id){} setChasedStatus(status){} }
+        class DummyVideoRecorder {}
+
+        let itemManager = new DummyItemManager();
+        let entityManager = new DummyEntityManager();
+        let videoRecorder = new DummyVideoRecorder();
+
+        // もしファイルが存在し、読み込みが成功すればそちらに差し替える
+        try {
+            const itemsMod = await import('./items.js').catch(() => null);
+            if (itemsMod && itemsMod.ItemManager) itemManager = new itemsMod.ItemManager();
+            
+            const entityMod = await import('./entity.js').catch(() => null);
+            if (entityMod && entityMod.EntityManager) entityManager = new entityMod.EntityManager();
+            
+            const videoMod = await import('./video.js').catch(() => null);
+            if (videoMod && videoMod.VideoRecorder) videoRecorder = new videoMod.VideoRecorder();
+        } catch(e) {
+            console.log("一部のオプショナルモジュールはモックを使用します");
+        }
 
         window.addEventListener('DOMContentLoaded', async () => {
             const canvas = document.getElementById('renderCanvas');
+            const loadingText = document.getElementById('loadingText');
+            const loadingSpinner = document.getElementById('loadingSpinner');
             
-            // WebGPUのサポートチェックと初期化（最優先）
-            let engine;
-            const isWebGPUSupported = await BABYLON.WebGPUEngine.IsSupportedAsync;
-            
-            if (isWebGPUSupported) {
-                engine = new BABYLON.WebGPUEngine(canvas, {
-                    antialiasing: true,
-                    preserveDrawingBuffer: true,
-                    stencil: true
+            try {
+                let engine;
+                loadingText.innerText = "CHECKING GRAPHICS API (WebGPU/WebGL2)...";
+                const isWebGPUSupported = await BABYLON.WebGPUEngine.IsSupportedAsync;
+                
+                if (isWebGPUSupported) {
+                    engine = new BABYLON.WebGPUEngine(canvas, {
+                        antialiasing: true,
+                        preserveDrawingBuffer: true,
+                        stencil: true
+                    });
+                    await engine.initializeDriversAsync();
+                    console.log("Rendering Engine: WebGPU");
+                } else {
+                    engine = new BABYLON.Engine(canvas, true, {
+                        preserveDrawingBuffer: true,
+                        stencil: true
+                    });
+                    console.log("Rendering Engine: WebGL2 (Fallback)");
+                }
+
+                // Havok 物理エンジンの初期化（スマホで引っかかりやすいポイントのため独立化）
+                loadingText.innerText = "LOADING HAVOK PHYSICS ENGINE...";
+                let hkPhysicsPlugin = null;
+                try {
+                    const havokInstance = await HavokPhysics();
+                    hkPhysicsPlugin = new BABYLON.HavokPlugin(true, havokInstance);
+                } catch(physicsError) {
+                    console.warn("Havok Physicsの初期化に失敗しました。物理演算なしで続行します:", physicsError);
+                }
+
+                loadingText.innerText = "CONSTRUCTING UI AND SYSTEMS...";
+                const uiManager = new UIManager();
+
+                // マネージャーの集約
+                const game = new GameManager(engine, canvas, hkPhysicsPlugin, {
+                    ui: uiManager,
+                    items: itemManager,
+                    entity: entityManager,
+                    video: videoRecorder
                 });
-                await engine.initializeDriversAsync();
-                console.log("Rendering Engine: WebGPU");
-            } else {
-                // フォールバックとしてWebGL2を使用
-                engine = new BABYLON.Engine(canvas, true, {
-                    preserveDrawingBuffer: true,
-                    stencil: true
-                });
-                console.log("Rendering Engine: WebGL2 (Fallback)");
+
+                loadingText.innerText = "GENERATING INFINITY CORE MAP...";
+                await game.init();
+
+                // すべて完了したらロード画面を消す
+                const loadingScreen = document.getElementById('loadingScreen');
+                loadingScreen.style.opacity = 0;
+                setTimeout(() => loadingScreen.style.display = 'none', 500);
+
+            } catch (err) {
+                // クラッシュした場合は画面上にエラー原因を赤文字で強制表示
+                if(loadingSpinner) loadingSpinner.style.display = 'none';
+                loadingText.style.color = "#ff3333";
+                loadingText.style.fontWeight = "bold";
+                loadingText.innerHTML = `CRITICAL ERROR OCCURRED:<br><br><span style="font-size:13px; font-family:monospace; background:rgba(0,0,0,0.5); padding:8px; display:inline-block; border-radius:4px;">${err.stack || err.message || err}</span>`;
+                console.error(err);
             }
-
-            // Havok 物理エンジンの初期化
-            const havokInstance = await HavokPhysics();
-            const hkPhysicsPlugin = new BABYLON.HavokPlugin(true, havokInstance);
-
-            // ゲーム全体のライフサイクル・管理クラスのインスタンス化
-            // 将来のMMO化や拡張性を見据え、各マネージャーをグローバルまたは親クラスに紐付けます
-            const uiManager = new UIManager();
-            const itemManager = new ItemManager();
-            const entityManager = new EntityManager();
-            const videoRecorder = new VideoRecorder();
-            
-            // map.jsのGameManagerにすべてを集約し、レベル接続を管理
-            const game = new GameManager(engine, canvas, hkPhysicsPlugin, {
-                ui: uiManager,
-                items: itemManager,
-                entity: entityManager,
-                video: videoRecorder
-            });
-
-            // 初期化・最初のレベル(Level 0)のロード
-            await game.init();
-
-            // ロード画面の非表示
-            const loadingScreen = document.getElementById('loadingScreen');
-            loadingScreen.style.opacity = 0;
-            setTimeout(() => loadingScreen.style.display = 'none', 500);
-
-            // ウィンドウサイズ変更への追従
-            window.addEventListener('resize', () => {
-                engine.resize();
-            });
         });
     </script>
 </body>

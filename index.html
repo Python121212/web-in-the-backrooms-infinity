@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>web in the backrooms Infinity</title>
     
+    <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="theme-color" content="#000000">
     <link rel="manifest" href="./manifest.json">
     <link rel="apple-touch-icon" href="./Texture/icon.png">
 
     <style>
-        /* 画面全体の初期化（スクロール禁止・フルスクリーン） */
+        /* 全画面表示のためのベーススタイル */
         html, body {
             overflow: hidden;
             width: 100%;
@@ -20,44 +20,44 @@
             margin: 0;
             padding: 0;
             background-color: #000000;
-            font-family: 'Courier New', Courier, monospace; /* VHS・レトロ風フォント */
+            font-family: 'Courier New', Courier, monospace; /* バックルームズの雰囲気に合わせたフォント */
             user-select: none;
             -webkit-user-select: none;
             touch-action: none;
         }
 
-        /* 3Dレンダリング用のCanvas */
+        /* Babylon.jsのメインキャンバス */
         #renderCanvas {
             width: 100%;
             height: 100%;
+            touch-action: none;
             display: block;
-            outline: none;
         }
 
-        /* UIレイヤー（ゲームオーバー、スタミナ、インベントリなどの親要素） */
-        #uiLayer {
+        /* ゲームUIのオーバーレイコンテナ（詳細はui.jsで制御） */
+        #uiContainer {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none; /* 3D側のクリック・タッチを邪魔しない */
+            pointer-events: none; /* 3D空間のクリックを邪魔しない */
             z-index: 10;
         }
 
-        /* ロード画面のスタイリング */
+        /* ロード画面 */
         #loadingScreen {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background-color: #111110;
+            background-color: #1a1a11; /* レベル0を意識したくすんだ黄色・カーキ系 */
             display: flex;
             flex-direction: column;
             justify-content: center;
             align-items: center;
-            color: #e6dfb8; /* Level 0の壁に近いレトロな黄・ベージュ色 */
+            color: #ffeedd;
             z-index: 100;
             transition: opacity 0.5s ease;
         }
@@ -66,7 +66,7 @@
             width: 50px;
             height: 50px;
             border: 5px solid #333;
-            border-top: 5px solid #e6dfb8;
+            border-top: 5px solid #d4af37;
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
@@ -79,97 +79,98 @@
 
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
     <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    <script src="https://cdn.babylonjs.com/postProcessesLibrary/babylonjs.postProcess.min.js"></script>
     
-    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
+    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_ammd.js"></script>
 </head>
 <body>
 
     <canvas id="renderCanvas"></canvas>
 
-    <div id="uiLayer">
+    <div id="uiContainer">
         </div>
 
     <div id="loadingScreen">
         <div class="spinner"></div>
-        <p style="margin-top: 20px; letter-spacing: 2px;">INITIALIZING WEBGPU ENVIRONMENT...</p>
+        <p id="loadingText" style="margin-top: 20px; letter-spacing: 2px;">INITIALIZING C.E.L.L. SYSTEM...</p>
     </div>
 
     <script type="module">
-        // 各種モジュールのインポート（将来的にロジックを関数化してエクスポートする前提）
-        // ※ 各jsファイル側で `export default ...` や `export function ...` を使用します。
-        import { initializeMap } from './map.js';
-        import { initializeUI } from './ui.js';
-        import { initializeItems } from './items.js';
-        import { initializeEntity } from './entity.js';
-        import { initializeVideoRecorder } from './video.js';
-
-        window.addEventListener('DOMContentLoaded', async () => {
-            const canvas = document.getElementById('renderCanvas');
-            let engine;
-            let scene;
-
-            try {
-                // 1. WebGPUのサポートチェックと最優先初期化
-                if (navigator.gpu && BABYLON.WebGPUEngine.IsSupportedAsync) {
-                    engine = new BABYLON.WebGPUEngine(canvas, {
-                        antialiasing: true
-                    });
-                    await engine.initAsync();
-                    console.log("Rendering Engine: WebGPU initialized.");
-                } else {
-                    // WebGPU未対応時のフォールバック（WebGL2）
-                    engine = new BABYLON.Engine(canvas, true);
-                    console.log("Rendering Engine: WebGL fallback initialized.");
-                }
-
-                // 2. Havok 物理エンジンの初期化
-                const havokInstance = await HavokPhysics();
-                const physicsPlugin = new BABYLON.HavokPlugin(true, havokInstance);
-
-                // 3. 基本となるシーンの作成
-                scene = new BABYLON.Scene(engine);
-                scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), physicsPlugin);
-
-                // 4. 各グローバル・サブシステムの初期化（依存注入）
-                const uiSystem     = initializeUI(scene);
-                const itemSystem   = initializeItems(scene);
-                const entitySystem = initializeEntity(scene);
-                const videoSystem  = initializeVideoRecorder(engine, scene);
-                
-                // 5. 核心となるマップ生成システムの起動（最初のLevel 0をロード）
-                await initializeMap(scene, { uiSystem, itemSystem, entitySystem });
-
-                // ロード画面の非表示
-                const loader = document.getElementById('loadingScreen');
-                loader.style.opacity = 0;
-                setTimeout(() => loader.remove(), 500);
-
-                // 6. メインループの実行
-                engine.runRenderLoop(() => {
-                    if (scene && scene.activeCamera) {
-                        scene.render();
-                    }
-                });
-
-                // ウィンドウリサイズ対応
-                window.addEventListener('resize', () => {
-                    engine.resize();
-                });
-
-            } catch (error) {
-                console.error("Failed to initialize the game environment:", error);
-                document.getElementById('loadingScreen').innerHTML = `<p style="color: #ff3333;">ERROR: FAILED TO INITIALIZE WEBGPU/HAVOK.<br>${error.message}</p>`;
-            }
-        });
-
         // PWA サービスワーカーの登録
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js')
-                    .then(reg => console.log('ServiceWorker registered: ', reg.scope))
-                    .catch(err => console.log('ServiceWorker registration failed: ', err));
+                navigator.serviceWorker.register('./sw.js').then(reg => {
+                    console.log('ServiceWorker registration successful with scope: ', reg.scope);
+                }).catch(err => {
+                    console.log('ServiceWorker registration failed: ', err);
+                });
             });
         }
+
+        // 各種コアモジュールをインポート
+        //（拡張性を高めるため、各ファイルは export / import が可能なESモジュール形式を想定しています）
+        import { GameManager } from './map.js';
+        import { UIManager } from './ui.js';
+        import { ItemManager } from './items.js';
+        import { EntityManager } from './entity.js';
+        import { VideoRecorder } from './video.js';
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            const canvas = document.getElementById('renderCanvas');
+            
+            // WebGPUのサポートチェックと初期化（最優先）
+            let engine;
+            const isWebGPUSupported = await BABYLON.WebGPUEngine.IsSupportedAsync;
+            
+            if (isWebGPUSupported) {
+                engine = new BABYLON.WebGPUEngine(canvas, {
+                    antialiasing: true,
+                    preserveDrawingBuffer: true,
+                    stencil: true
+                });
+                await engine.initializeDriversAsync();
+                console.log("Rendering Engine: WebGPU");
+            } else {
+                // フォールバックとしてWebGL2を使用
+                engine = new BABYLON.Engine(canvas, true, {
+                    preserveDrawingBuffer: true,
+                    stencil: true
+                });
+                console.log("Rendering Engine: WebGL2 (Fallback)");
+            }
+
+            // Havok 物理エンジンの初期化
+            const havokInstance = await HavokPhysics();
+            const hkPhysicsPlugin = new BABYLON.HavokPlugin(true, havokInstance);
+
+            // ゲーム全体のライフサイクル・管理クラスのインスタンス化
+            // 将来のMMO化や拡張性を見据え、各マネージャーをグローバルまたは親クラスに紐付けます
+            const uiManager = new UIManager();
+            const itemManager = new ItemManager();
+            const entityManager = new EntityManager();
+            const videoRecorder = new VideoRecorder();
+            
+            // map.jsのGameManagerにすべてを集約し、レベル接続を管理
+            const game = new GameManager(engine, canvas, hkPhysicsPlugin, {
+                ui: uiManager,
+                items: itemManager,
+                entity: entityManager,
+                video: videoRecorder
+            });
+
+            // 初期化・最初のレベル(Level 0)のロード
+            await game.init();
+
+            // ロード画面の非表示
+            const loadingScreen = document.getElementById('loadingScreen');
+            loadingScreen.style.opacity = 0;
+            setTimeout(() => loadingScreen.style.display = 'none', 500);
+
+            // ウィンドウサイズ変更への追従
+            window.addEventListener('resize', () => {
+                engine.resize();
+            });
+        });
     </script>
 </body>
 </html>

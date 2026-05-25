@@ -1,256 +1,247 @@
-// ui.js - マルチタッチ対応仮想スティック ＆ 視点移動エリア管理
+/**
+ * ui.js
+ * UI全般の描画・スタミナ制御・インベントリ・VHSオーバーレイ管理
+ * * 【プログラミング原則】
+ * 1. 独立性：DOM操作とスタミナの数値計算をここに集約。
+ * 2. マルチプレイ（MMO）への布石：追跡フラグ (isChased) を外部APIやentity.jsからいつでも書き換え・同期可能な設計。
+ */
 
 export class UIManager {
-    constructor(playerStateCallbacks) {
-        this.playerState = playerStateCallbacks;
-        this.isMobile = this.detectMobile();
+    constructor() {
+        this.game = null;
         
-        // スティック用
-        this.stickActive = false;
-        this.stickTouchId = null;
-        this.stickStartPos = { x: 0, y: 0 };
-        this.stickMoveVector = { x: 0, y: 0 };
+        // スタミナ関連パラメーター
+        this.maxStamina = 100;     // 最大スタミナ
+        this.stamina = 100;        // 現在のスタミナ
+        this.dashDuration = 10;    // 通常時の最大ダッシュ時間 (10秒)
+        this.isDashing = false;
+        this.isChased = false;     // エンティティからの追跡フラグ（trueでスタミナ無限化）
+        
+        // インベントリ関連（最大9個）
+        this.inventory = new Array(9).fill(null);
+        this.selectedSlot = 0;
 
-        // 視点移動用
-        this.lookTouchId = null;
-        this.lastLookPos = { x: 0, y: 0 };
-
-        this.initCSS();
-        this.createUI();
-        this.bindEvents();
+        // UIのDOM要素保持用
+        this.elements = {};
     }
 
-    detectMobile() {
-        return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    }
+    /**
+     * UIの初期化とDOM要素の動的生成
+     * @param {GameManager} gameManager 
+     */
+    init(gameManager) {
+        this.game = gameManager;
+        const container = document.getElementById('uiContainer');
+        if (!container) return;
 
-    initCSS() {
+        // 1. VHS風レトロエフェクト用テキストの追加
+        const vhsOverlay = document.createElement('div');
+        vhsOverlay.id = 'vhsOverlay';
+        vhsOverlay.style.cssText = `
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            color: #ebebeb; font-family: 'Courier New', monospace; font-size: 18px;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.8); z-index: 15; pointer-events: none;
+        `;
+        vhsOverlay.innerHTML = `
+            <div style="position: absolute; top: 20px; left: 30px; font-weight: bold; color: #ff3333; animation: blink 1s infinite;">● REC</div>
+            <div id="vhsTime" style="position: absolute; bottom: 30px; left: 30px;">00:00:00</div>
+            <div style="position: absolute; top: 20px; right: 30px;">SP</div>
+            <div style="position: absolute; bottom: 30px; right: 30px;">[▰▰▰▰▱] 85%</div>
+        `;
+        container.appendChild(vhsOverlay);
+
+        // 点滅アニメーションのスタイルを追加
         const style = document.createElement('style');
-        style.textContent = `
-            #game-ui-container {
-                position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-                pointer-events: none; font-family: 'Courier New', Courier, monospace;
-                user-select: none; z-index: 20;
-            }
-            .interactive { pointer-events: auto; }
-
-            #reticle {
-                position: absolute; top: 50%; left: 50%; width: 4px; height: 4px;
-                background-color: rgba(255, 255, 255, 0.4); border-radius: 50%; transform: translate(-50%, -50%);
-            }
-
-            #status-display {
-                position: absolute; bottom: 150px; left: 20px;
-                color: #5e5a32; font-size: 14px; line-height: 1.5; text-shadow: 1px 1px 2px #000;
-            }
-            .status-active { color: #d1ca74; font-weight: bold; text-shadow: 0 0 5px rgba(209,202,116,0.5); }
-
-            /* 仮想スティック */
-            #joystick-base {
-                position: absolute; bottom: 30px; left: 30px; width: 90px; height: 90px;
-                background: rgba(0, 0, 0, 0.6); border: 2px solid #5e5a32; border-radius: 50%;
-                display: flex; align-items: center; justify-content: center; touch-action: none;
-            }
-            #joystick-knob { width: 35px; height: 35px; background: #5e5a32; border-radius: 50%; }
-
-            /* 視点操作用タッチパッド（左側のスティック領域以外を広くカバー） */
-            #mobile-look-touchpad {
-                position: absolute; top: 0; right: 0; width: 100%; height: 100%;
-                touch-action: none; z-index: 5;
-            }
-
-            /* ボタン類（最前面に配置） */
-            .mobile-btn {
-                position: absolute; width: 60px; height: 60px; background: rgba(0, 0, 0, 0.6);
-                border: 2px solid #5e5a32; border-radius: 50%; color: #5e5a32;
-                font-size: 11px; font-weight: bold; display: flex; align-items: center; justify-content: center;
-                touch-action: none; z-index: 25;
-            }
-            .mobile-btn:active { background: rgba(94, 90, 50, 0.7); color: #fff; }
-            #btn-jump { bottom: 100px; right: 20px; }
-            #btn-sprint { bottom: 25px; right: 20px; }
-            #btn-lean-l { bottom: 100px; right: 95px; border-radius: 8px; }
-            #btn-lean-r { bottom: 25px; right: 95px; border-radius: 8px; }
+        style.innerHTML = `
+            @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+            .slot.active { border-color: #d4af37 !important; background: rgba(212, 175, 55, 0.2) !important; }
         `;
         document.head.appendChild(style);
+
+        // 2. スタミナバーの生成
+        const staminaWrapper = document.createElement('div');
+        staminaWrapper.style.cssText = 'position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%); width: 200px; height: 8px; background: rgba(0,0,0,0.5); border: 1px solid #555; z-index: 20;';
+        
+        const staminaBar = document.createElement('div');
+        staminaBar.id = 'staminaBar';
+        staminaBar.style.cssText = 'width: 100%; height: 100%; background: #00ffcc; transition: width 0.1s linear, background-color 0.3s;';
+        staminaWrapper.appendChild(staminaBar);
+        container.appendChild(staminaWrapper);
+        this.elements.staminaBar = staminaBar;
+
+        // 3. インベントリ（9スロット）の生成
+        const invContainer = document.createElement('div');
+        invContainer.id = 'inventory';
+        invContainer.style.cssText = 'position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; z-index: 20; pointer-events: auto;';
+        
+        for (let i = 0; i < 9; i++) {
+            const slot = document.createElement('div');
+            slot.className = `slot ${i === 0 ? 'active' : ''}`;
+            slot.style.cssText = 'width: 50px; height: 50px; background: rgba(0,0,0,0.6); border: 2px solid #555; display: flex; justify-content: center; align-items: center; color: #fff; font-size: 12px; position: relative;';
+            
+            // スロット番号の表示
+            const num = document.createElement('span');
+            num.innerText = i + 1;
+            num.style.cssText = 'position: absolute; top: 2px; left: 4px; font-size: 9px; color: #aaa;';
+            slot.appendChild(num);
+
+            // アイテム画像・テキスト用
+            const content = document.createElement('span');
+            content.id = `slot-content-${i}`;
+            slot.appendChild(content);
+
+            invContainer.appendChild(slot);
+        }
+        container.appendChild(invContainer);
+
+        // 4. 通知用オーバーレイ
+        const notification = document.createElement('div');
+        notification.id = 'levelNotification';
+        notification.style.cssText = 'position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #ffeedd; font-size: 28px; letter-spacing: 5px; opacity: 0; transition: opacity 1s ease; z-index: 30; pointer-events: none;';
+        container.appendChild(notification);
+        this.elements.notification = notification;
+
+        // ロード用の黒幕マスク
+        const mask = document.createElement('div');
+        mask.id = 'loadingMask';
+        mask.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #000; opacity: 0; transition: opacity 0.4s ease; z-index: 90; pointer-events: none;';
+        container.appendChild(mask);
+        this.elements.mask = mask;
+
+        // タイマー更新の開始
+        this.startVHSTimer();
+        
+        // 入力イベントリスナーの登録（スロット切り替え用）
+        this.registerInputListeners();
     }
 
-    createUI() {
-        const container = document.createElement('div');
-        container.id = 'game-ui-container';
+    /**
+     * スタミナの毎フレーム計算ロジック
+     * プレイヤーの移動処理ループ（あるいはBabylonのBeforeRender）内から毎フレーム呼び出す
+     * @param {number} deltaTime 秒単位の経過時間（例: 1/60 ≒ 0.016）
+     */
+    updateStamina(deltaTime) {
+        // 通常時のダッシュ消費レート（10秒で100消費 = 1秒に10消費）
+        const depletionRate = this.maxStamina / this.dashDuration; 
+        const recoveryRate = 15; // 1秒間に15回復
 
-        if (!this.isMobile) {
-            const reticle = document.createElement('div');
-            reticle.id = 'reticle';
-            container.appendChild(reticle);
+        if (this.isDashing) {
+            // 【最重要要件】エンティティに追跡されている最中はスタミナが減らない（無限ダッシュ）
+            if (this.isChased) {
+                this.stamina = this.maxStamina; // スタミナを最大値で固定維持
+                this.elements.staminaBar.style.backgroundColor = "#ff3333"; // 追跡時はバーを警告赤に
+            } else {
+                // 通常時のダッシュ消費
+                this.stamina = Math.max(0, this.stamina - depletionRate * deltaTime);
+                this.elements.staminaBar.style.backgroundColor = "#00ffcc";
+            }
+        } else {
+            // 非ダッシュ時はスタミナが徐々に回復
+            this.stamina = Math.min(this.maxStamina, this.stamina + recoveryRate * deltaTime);
+            if (!this.isChased) this.elements.staminaBar.style.backgroundColor = "#00ffcc";
         }
 
-        const statusDisplay = document.createElement('div');
-        statusDisplay.id = 'status-display';
-        statusDisplay.innerHTML = `
-            STAMINA: <span id="ui-stamina">100%</span><br>
-            STATE: <span id="state-normal" class="status-active">NORMAL</span> <span id="state-sprint">SPRINT</span><br>
-            LEAN: <span id="state-lean-l">LEFT</span> / <span id="state-lean-n" class="status-active">NONE</span> / <span id="state-lean-r">RIGHT</span>
+        // UIバーの幅に反映
+        const percentage = (this.stamina / this.maxStamina) * 100;
+        this.elements.staminaBar.style.width = `${percentage}%`;
+    }
+
+    /**
+     * エンティティの追跡状態をセットする（外部・entity.jsから叩かれる）
+     * @param {boolean} chased 
+     */
+    setChasedStatus(chased) {
+        this.isChased = chased;
+        console.log(`[Stamina Sync] 追跡フラグ変更: ${chased} (スタミナ無限化: ${chased})`);
+    }
+
+    /**
+     * アイテムのインベントリへの追加（最大9個）
+     * @param {string} itemName アイテム名
+     * @return {boolean} 拾得に成功したか
+     */
+    addItem(itemName) {
+        const emptySlotIndex = this.inventory.findIndex(item => item === null);
+        if (emptySlotIndex !== -1) {
+            this.inventory[emptySlotIndex] = itemName;
+            this.updateInventoryUI();
+            return true;
+        }
+        console.log("インベントリが満杯です（最大9個）");
+        return false;
+    }
+
+    /**
+     * インベントリUIの同期更新
+     */
+    updateInventoryUI() {
+        for (let i = 0; i < 9; i++) {
+            const content = document.getElementById(`slot-content-${i}`);
+            if (content) {
+                content.innerText = this.inventory[i] ? this.inventory[i] : "";
+            }
+        }
+    }
+
+    /**
+     * 新しいレベルに突入した際の不気味なテキスト通知
+     */
+    showLevelNotification(name, type) {
+        let displayType = "NORMAL LEVEL";
+        if (type === "minus") displayType = "MINUS LEVEL";
+        if (type === "sub") displayType = "SUB LEVEL";
+
+        this.elements.notification.innerHTML = `
+            <div style="font-size: 14px; color: #888; margin-bottom: 5px;">${displayType}</div>
+            <div style="font-weight: bold; text-transform: uppercase;">${name}</div>
         `;
-        container.appendChild(statusDisplay);
-
-        if (this.isMobile) {
-            const lookPad = document.createElement('div');
-            lookPad.id = 'mobile-look-touchpad';
-            lookPad.className = 'interactive';
-            container.appendChild(lookPad);
-
-            const jsBase = document.createElement('div');
-            jsBase.id = 'joystick-base';
-            jsBase.className = 'interactive';
-            const jsKnob = document.createElement('div');
-            jsKnob.id = 'joystick-knob';
-            jsBase.appendChild(jsKnob);
-            container.appendChild(jsBase);
-
-            container.appendChild(this.makeButton('btn-jump', 'JUMP'));
-            container.appendChild(this.makeButton('btn-sprint', 'RUN'));
-            container.appendChild(this.makeButton('btn-lean-l', 'LEAN L'));
-            container.appendChild(this.makeButton('btn-lean-r', 'LEAN R'));
-        }
-
-        document.body.appendChild(container);
+        
+        this.elements.notification.style.opacity = 1;
+        
+        setTimeout(() => {
+            this.elements.notification.style.opacity = 0;
+        }, 4000); // 4秒後にフェードアウト
     }
 
-    makeButton(id, text) {
-        const btn = document.createElement('div');
-        btn.id = id; btn.className = 'mobile-btn interactive'; btn.innerText = text;
-        return btn;
+    /**
+     * レベル遷移時のロード画面演出（フェードイン・アウト）
+     */
+    showLoadingOverlay() { this.elements.mask.style.opacity = 1; }
+    hideLoadingOverlay() { this.elements.mask.style.opacity = 0; }
+
+    /**
+     * VHSのタイムコード風タイマーをインクリメント
+     */
+    startVHSTimer() {
+        let totalSeconds = 0;
+        setInterval(() => {
+            totalSeconds++;
+            const hrs = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+            const mins = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+            const secs = String(totalSeconds % 60).padStart(2, '0');
+            
+            const timeElement = document.getElementById('vhsTime');
+            if (timeElement) timeElement.innerText = `${hrs}:${mins}:${secs}`;
+        }, 1000);
     }
 
-    bindEvents() {
-        if (!this.isMobile) {
-            // PC用キーバインドのUI同期
-            window.addEventListener('keydown', (e) => {
-                if (e.shiftKey) this.setSprintUI(true);
-                if (e.key.toLowerCase() === 'q') this.setLeanUI('left');
-                if (e.key.toLowerCase() === 'e') this.setLeanUI('right');
-            });
-            window.addEventListener('keyup', (e) => {
-                if (e.key === 'Shift') this.setSprintUI(false);
-                if (e.key.toLowerCase() === 'q' || e.key.toLowerCase() === 'e') this.setLeanUI('none');
-            });
-            return;
-        }
-
-        const base = document.getElementById('joystick-base');
-        const knob = document.getElementById('joystick-knob');
-        const lookPad = document.getElementById('mobile-look-touchpad');
-        const maxRadius = 35;
-
-        // --- マルチタッチ完全対応イベント ---
-        window.addEventListener('touchstart', (e) => {
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                const touch = e.changedTouches[i];
+    /**
+     * キーボードの1~9キーでインベントリスロットを選択するリスナー
+     */
+    registerInputListeners() {
+        window.addEventListener('keydown', (e) => {
+            if (e.key >= '1' && e.key <= '9') {
+                const index = parseInt(e.key) - 1;
                 
-                // ボタン類へのタッチはスルー
-                if (touch.target.classList.contains('mobile-btn')) continue;
-
-                // 左下領域かつスティックが未作動ならスティックとして処理
-                if (!this.stickActive && touch.clientX < window.innerWidth * 0.45 && touch.clientY > window.innerHeight * 0.4) {
-                    this.stickActive = true;
-                    this.stickTouchId = touch.identifier;
-                    const rect = base.getBoundingClientRect();
-                    this.stickStartPos = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-                } 
-                // それ以外はすべて視点移動として処理
-                else if (this.lookTouchId === null) {
-                    this.lookTouchId = null;
-                    this.lookTouchId = touch.identifier;
-                    this.lastLookPos = { x: touch.clientX, y: touch.clientY };
-                }
-            }
-        }, { passive: false });
-
-        window.addEventListener('touchmove', (e) => {
-            for (let i = 0; i < e.touches.length; i++) {
-                const touch = e.touches[i];
-
-                // 1. スティックの移動処理
-                if (this.stickActive && touch.identifier === this.stickTouchId) {
-                    const dx = touch.clientX - this.stickStartPos.x;
-                    const dy = touch.clientY - this.stickStartPos.y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-                    const angle = Math.atan2(dy, dx);
-                    let moveX = dx; let moveY = dy;
-
-                    if (distance > maxRadius) {
-                        moveX = Math.cos(angle) * maxRadius;
-                        moveY = Math.sin(angle) * maxRadius;
-                    }
-                    knob.style.transform = `translate(${moveX}px, ${moveY}px)`;
-                    this.stickMoveVector.x = moveX / maxRadius;
-                    this.stickMoveVector.y = -(moveY / maxRadius);
-                    
-                    if (this.playerState.onStickMove) this.playerState.onStickMove(this.stickMoveVector.x, this.stickMoveVector.y);
-                }
-
-                // 2. 視点移動の処理（移動しながら同時に実行可能）
-                if (touch.identifier === this.lookTouchId) {
-                    const movementX = touch.clientX - this.lastLookPos.x;
-                    const movementY = touch.clientY - this.lastLookPos.y;
-                    
-                    if (this.playerState.onLookMove) {
-                        this.playerState.onLookMove(movementX, movementY);
-                    }
-                    this.lastLookPos = { x: touch.clientX, y: touch.clientY };
-                }
-            }
-        }, { passive: false });
-
-        window.addEventListener('touchend', (e) => {
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                const touch = e.changedTouches[i];
-                if (touch.identifier === this.stickTouchId) {
-                    this.stickActive = false;
-                    this.stickTouchId = null;
-                    knob.style.transform = `translate(0px, 0px)`;
-                    this.stickMoveVector = { x: 0, y: 0 };
-                    if (this.playerState.onStickMove) this.playerState.onStickMove(0, 0);
-                }
-                if (touch.identifier === this.lookTouchId) {
-                    this.lookTouchId = null;
-                }
+                // アクティブなスロット表示の切り替え
+                const slots = document.querySelectorAll('#inventory .slot');
+                slots[this.selectedSlot].classList.remove('active');
+                
+                this.selectedSlot = index;
+                slots[this.selectedSlot].classList.add('active');
+                
+                console.log(`スロット ${e.key} が選択されました:`, this.inventory[this.selectedSlot]);
             }
         });
-
-        // ボタンイベントの紐付け
-        document.getElementById('btn-jump').addEventListener('touchstart', (e) => { e.preventDefault(); if (this.playerState.onJump) this.playerState.onJump(); });
-        const sprintBtn = document.getElementById('btn-sprint');
-        sprintBtn.addEventListener('touchstart', (e) => { e.preventDefault(); this.setSprintUI(true); if (this.playerState.onSprint) this.playerState.onSprint(true); });
-        sprintBtn.addEventListener('touchend', () => { this.setSprintUI(false); if (this.playerState.onSprint) this.playerState.onSprint(false); });
-        
-        const leanLBtn = document.getElementById('btn-lean-l');
-        leanLBtn.addEventListener('touchstart', (e) => { e.preventDefault(); this.setLeanUI('left'); if (this.playerState.onLean) this.playerState.onLean('left'); });
-        leanLBtn.addEventListener('touchend', () => { this.setLeanUI('none'); if (this.playerState.onLean) this.playerState.onLean('none'); });
-        
-        const leanRBtn = document.getElementById('btn-lean-r');
-        leanRBtn.addEventListener('touchstart', (e) => { e.preventDefault(); this.setLeanUI('right'); if (this.playerState.onLean) this.playerState.onLean('right'); });
-        leanRBtn.addEventListener('touchend', () => { this.setLeanUI('none'); if (this.playerState.onLean) this.playerState.onLean('none'); });
-    }
-
-    setSprintUI(isSprinting) {
-        const normal = document.getElementById('state-normal');
-        const sprint = document.getElementById('state-sprint');
-        if (normal && sprint) {
-            normal.className = isSprinting ? '' : 'status-active';
-            sprint.className = isSprinting ? 'status-active' : '';
-        }
-    }
-
-    setLeanUI(direction) {
-        document.getElementById('state-lean-l').className = direction === 'left' ? 'status-active' : '';
-        document.getElementById('state-lean-n').className = direction === 'none' ? 'status-active' : '';
-        document.getElementById('state-lean-r').className = direction === 'right' ? 'status-active' : '';
-    }
-
-    updateStamina(value) {
-        const staminaEl = document.getElementById('ui-stamina');
-        if (staminaEl) staminaEl.innerText = `${Math.max(0, Math.min(100, Math.floor(value)))}%`;
     }
 }
